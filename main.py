@@ -6,6 +6,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     ConversationHandler, MessageHandler, filters, ContextTypes,
@@ -22,6 +23,9 @@ GOOGLE_CREDENTIALS_FILE = "service_account.json"
 
 if not TELEGRAM_TOKEN:
     raise ValueError("No TELEGRAM_TOKEN found in .env file.")
+
+if not SPREADSHEET_URL_OR_ID:
+    raise ValueError("No SPREADSHEET_ID found in .env file.")
 
 # Define your custom categories here
 CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
@@ -222,23 +226,48 @@ async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ No entries found to delete.")
 
+async def _reply_chunked(message, text, **kwargs):
+    """Send `text` split across Telegram's 4096-char limit, breaking on line
+    boundaries so each chunk's Markdown entities stay self-contained."""
+    MAX = 4096
+    if len(text) <= MAX:
+        await message.reply_text(text, **kwargs)
+        return
+    buf = ""
+    for line in text.split("\n"):
+        if buf and len(buf) + len(line) + 1 > MAX:
+            await message.reply_text(buf.rstrip("\n"), **kwargs)
+            buf = ""
+        buf += line + "\n"
+    if buf.strip():
+        await message.reply_text(buf.rstrip("\n"), **kwargs)
+
 async def list_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
     records = db.list_expenses()
     if not records:
         await update.message.reply_text("No expenses logged this month.")
         return
 
-    response = f"**{datetime.now().strftime('%B %Y')} Expenses**\n"
+    lines = [f"**{datetime.now().strftime('%B %Y')} Expenses**"]
     total = 0.0
-    
+
     for i, row in enumerate(records, start=1):
-        if row['Type'] == 'Expense':
-            name = row.get('Notes') or ' '
-            response += f"`[{i}]` ({format_date(row['Date'])}) {name}: ${row['Amount']}\n"
+        if row.get('Type') != 'Expense':
+            continue
+        # A single malformed cell must not crash the whole listing.
+        try:
             total += float(row['Amount'])
-            
-    response += f"\n*Total: ${total:.2f}*"
-    await update.message.reply_text(response, parse_mode='Markdown')
+        except (ValueError, TypeError, KeyError):
+            pass
+        # Escape user-controlled fields so stray markdown chars (e.g. "Mc_Donald")
+        # can't break Telegram's Markdown parser and abort the message.
+        name = escape_markdown(str(row.get('Notes') or ' '), version=1)
+        date = escape_markdown(str(format_date(row.get('Date'))), version=1)
+        amount = escape_markdown(str(row.get('Amount', '')), version=1)
+        lines.append(f"`[{i}]` ({date}) {name}: ${amount}")
+
+    lines.append(f"\n*Total: ${total:.2f}*")
+    await _reply_chunked(update.message, "\n".join(lines), parse_mode='Markdown')
 
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
