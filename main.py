@@ -105,9 +105,9 @@ class SheetsHelper:
         if not ws.row_values(target_row):
             return None
 
-        if category:
+        if category is not None:
             ws.update_cell(target_row, 4, category)
-        if amount:
+        if amount is not None:
             ws.update_cell(target_row, 5, amount)
         if name is not None:
             ws.update_cell(target_row, 6, name)
@@ -124,12 +124,13 @@ AWAITING_NAME, AWAITING_CATEGORY = range(2)
 
 async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Usage: /spend [amount] — starts the add-expense flow by asking for a name."""
-    try:
-        amount = float(context.args[0])
-    except (IndexError, ValueError):
+    # Strict money form only: rejects inf/nan, scientific notation (1e9),
+    # underscores (1_000) and >2 decimals that float() would otherwise accept.
+    if not context.args or not re.fullmatch(r'\d+(\.\d{1,2})?', context.args[0]):
         await update.message.reply_text("❌ Syntax: /spend [amount]\nExample: /spend 12.50")
         return ConversationHandler.END
 
+    amount = float(context.args[0])
     if amount <= 0:
         await update.message.reply_text("⚠️ Amount must be greater than zero.")
         return ConversationHandler.END
