@@ -1,0 +1,10 @@
+# Telegram bot framework. The [webhooks] extra pulls in tornado, which
+# app.run_webhook() requires — without it, webhook mode fails on Render.
+python-telegram-bot[webhooks]==21.9
+
+# Google Sheets access + service-account auth
+gspread==6.1.4
+google-auth==2.37.0
+
+# Loads .env for local development (no-op in Render, which injects env vars)
+python-dotenv==1.0.1

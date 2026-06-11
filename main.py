@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import uuid
 import logging
 from datetime import datetime
@@ -21,6 +22,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SPREADSHEET_URL_OR_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_CREDENTIALS_FILE = "service_account.json"
 
+# Webhook (hosted) configuration. On Render, the platform automatically injects
+# RENDER_EXTERNAL_URL (the public https URL of the web service) and PORT, so the
+# bot picks those up with no manual setup. WEBHOOK_URL can still be set explicitly
+# to override (e.g. a custom domain or another host). When neither is present the
+# bot falls back to long-polling, which is what you want for local development.
+WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+PORT = int(os.getenv("PORT", "8080"))
+
 if not TELEGRAM_TOKEN:
     raise ValueError("No TELEGRAM_TOKEN found in .env file.")
 
@@ -37,9 +47,20 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 class SheetsHelper:
     def __init__(self):
         scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
+        creds = self._load_credentials(scopes)
         self.client = gspread.authorize(creds)
         self.sheet = self.client.open_by_key(SPREADSHEET_URL_OR_ID)
+
+    @staticmethod
+    def _load_credentials(scopes):
+        """Load service-account credentials. Prefers GOOGLE_CREDENTIALS_JSON (the raw
+        JSON pasted into a Render env var) so no key file needs to live in the repo or
+        image; falls back to the local service_account.json file for development."""
+        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
+        if creds_json:
+            info = json.loads(creds_json)
+            return Credentials.from_service_account_info(info, scopes=scopes)
+        return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
 
     def _get_current_month_worksheet(self):
         month_name = datetime.now().strftime("%b_%Y")
@@ -338,5 +359,22 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("rm", remove))
     app.add_handler(CommandHandler("edit", edit))
 
-    print("Bot is polling...")
-    app.run_polling()
+    if WEBHOOK_URL:
+        # Hosted (Render) mode: Telegram pushes updates to our HTTPS endpoint instead
+        # of us long-polling. Render injects PORT and the service must bind it on
+        # 0.0.0.0. The bot token is used as the URL path so the endpoint is
+        # unguessable; WEBHOOK_SECRET (if set) adds Telegram's X-Telegram-Bot-Api-
+        # Secret-Token header check on top.
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{TELEGRAM_TOKEN}"
+        print(f"Bot starting in webhook mode on port {PORT}...")
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=PORT,
+            url_path=TELEGRAM_TOKEN,
+            webhook_url=webhook_url,
+            secret_token=WEBHOOK_SECRET or None,
+            drop_pending_updates=True,
+        )
+    else:
+        print("Bot is polling...")
+        app.run_polling()
