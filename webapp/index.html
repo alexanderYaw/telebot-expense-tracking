@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Expenses</title>
+  <!-- Telegram Mini App SDK. No-op when the page is opened directly in a browser,
+       so this prototype still works standalone for design review. -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top bar -->
+    <header class="topbar">
+      <h1 id="topbar-title">Home</h1>
+      <button id="month-pill" class="month-pill" type="button">June 2026</button>
+    </header>
+
+    <!-- Scrollable view area; one <section> per tab -->
+    <main id="view" class="view">
+      <section id="view-home" class="tabview"></section>
+      <section id="view-add" class="tabview hidden"></section>
+      <section id="view-history" class="tabview hidden"></section>
+      <section id="view-categories" class="tabview hidden"></section>
+    </main>
+
+    <!-- Bottom tab bar -->
+    <nav class="tabbar">
+      <button class="tab is-active" data-tab="home" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10"/></svg>
+        <span>Home</span>
+      </button>
+      <button class="tab" data-tab="add" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+        <span>Add</span>
+      </button>
+      <button class="tab" data-tab="history" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M4 12h16M4 19h10"/></svg>
+        <span>History</span>
+      </button>
+      <button class="tab" data-tab="categories" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7l3-3h6l9 9-9 9-9-9V7z"/><circle cx="8" cy="9" r="1.4"/></svg>
+        <span>Categories</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Lightweight toast for fake submits -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
