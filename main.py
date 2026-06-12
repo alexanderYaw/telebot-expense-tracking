@@ -40,6 +40,15 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "8080"))
 
+# Owner allowlist. Both the bot commands and the Mini App API are restricted to
+# these Telegram numeric user IDs. The account owner is hard-coded so the bot is
+# locked down by default; extra IDs can be added via the ALLOWED_USER_IDS env var
+# (comma-separated) without a code change.
+_OWNER_USER_IDS = {391409754}
+ALLOWED_USER_IDS = _OWNER_USER_IDS | {
+    int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x
+}
+
 if not TELEGRAM_TOKEN:
     raise ValueError("No TELEGRAM_TOKEN found in .env file.")
 
@@ -429,22 +438,28 @@ def build_application():
         builder = builder.updater(None)
     application = builder.build()
 
+    # Restrict every handler to the owner allowlist: messages from anyone else
+    # simply don't match, so the bot stays silent for strangers. The category
+    # callback step needs no filter — the conversation is per-user, so only the
+    # owner who passed the /spend entry filter can reach it.
+    owner = filters.User(user_id=list(ALLOWED_USER_IDS))
+
     # Register the multi-step add-expense flow: /spend -> name -> category buttons
     add_expense_conv = ConversationHandler(
-        entry_points=[CommandHandler("spend", spend)],
+        entry_points=[CommandHandler("spend", spend, filters=owner)],
         states={
-            AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_name)],
+            AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & owner, receive_name)],
             AWAITING_CATEGORY: [CallbackQueryHandler(receive_category, pattern=r"^setcat\|")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel, filters=owner)],
     )
     application.add_handler(add_expense_conv)
 
     # Register Text Commands
-    application.add_handler(CommandHandler("undo", undo))
-    application.add_handler(CommandHandler("list", list_month))
-    application.add_handler(CommandHandler("rm", remove))
-    application.add_handler(CommandHandler("edit", edit))
+    application.add_handler(CommandHandler("undo", undo, filters=owner))
+    application.add_handler(CommandHandler("list", list_month, filters=owner))
+    application.add_handler(CommandHandler("rm", remove, filters=owner))
+    application.add_handler(CommandHandler("edit", edit, filters=owner))
     return application
 
 
@@ -477,10 +492,24 @@ def validate_init_data(init_data: str):
     return pairs
 
 
+def _init_data_user_id(auth: dict):
+    """Pull the numeric Telegram user id out of validated initData's `user` field."""
+    try:
+        return json.loads(auth.get("user", "")).get("id")
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
 async def require_auth(x_telegram_init_data: str = Header(default="")):
+    # DEV_MODE (local preview / ALLOW_INSECURE_WEBAPP) skips all checks so the
+    # webapp can be opened in a plain browser with no signed initData.
+    if DEV_MODE:
+        return None
     auth = validate_init_data(x_telegram_init_data)
-    if auth is None and not DEV_MODE:
+    if auth is None:
         raise HTTPException(status_code=401, detail="Unauthorized")
+    if _init_data_user_id(auth) not in ALLOWED_USER_IDS:
+        raise HTTPException(status_code=403, detail="Forbidden")
     return auth
 
 
