@@ -1,6 +1,12 @@
-# Telegram bot framework. The [webhooks] extra pulls in tornado, which
-# app.run_webhook() requires — without it, webhook mode fails on Render.
-python-telegram-bot[webhooks]==21.9
+# Telegram bot framework. We feed updates to PTB ourselves from the FastAPI
+# webhook route (no run_webhook), so the [webhooks]/tornado extra is no longer
+# needed — uvicorn is our HTTP server instead.
+python-telegram-bot==21.9
+
+# Web server: one ASGI app serves the Telegram webhook, the /api routes, and
+# the static Mini App (webapp/).
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
 
 # Google Sheets access + service-account auth
 gspread==6.1.4
