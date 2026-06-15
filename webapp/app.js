@@ -636,5 +636,14 @@ $('#app').addEventListener('click', async (e) => {
   }
 });
 
+// Initial load: keep the full-screen loader up until the first month's data has
+// been fetched and Home has painted, then reveal the app.
 syncMonthPill();
-switchTab('home');
+(async () => {
+  try {
+    await switchTab('home');
+  } finally {
+    const loader = $('#loader');
+    if (loader) loader.classList.add('hidden');
+  }
+})();
