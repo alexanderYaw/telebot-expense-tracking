@@ -390,7 +390,7 @@ function addForm(type) {
       ${categoryField()}
       <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
       ${excludeField()}
-      <p class="hint-text">🔁 Logged automatically each month on this day.</p>
+      <p class="hint-text">Logged automatically each month on this day.</p>
       <button id="add-submit" class="btn-primary">Add recurring expense</button>`;
   }
   if (type === 'income') {
@@ -398,7 +398,7 @@ function addForm(type) {
       <div class="field"><label>Source</label><input id="f-name" placeholder="e.g. Monthly salary"></div>
       ${amountField()}
       <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
-      <p class="hint-text">💰 Recurring monthly income.</p>
+      <p class="hint-text">Recurring monthly income.</p>
       <button id="add-submit" class="btn-primary">Add income</button>`;
   }
   // incoming funds (one-off payment from a person)
@@ -406,7 +406,7 @@ function addForm(type) {
     <div class="field"><label>From</label><input id="f-name" placeholder="e.g. Dinner split — Wei"></div>
     ${amountField()}
     <div class="field"><label>Date</label><input id="f-date" type="date" value="${todayISO()}"></div>
-    <p class="hint-text">🤝 A payment received from someone else.</p>
+    <p class="hint-text">A payment received from someone else.</p>
     <button id="add-submit" class="btn-primary">Add incoming funds</button>`;
 }
 

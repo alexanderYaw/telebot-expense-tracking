@@ -8,9 +8,16 @@ python-telegram-bot==21.9
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
 
-# Google Sheets access + service-account auth
+# Google Sheets access + service-account auth (legacy store / one-time import)
 gspread==6.1.4
 google-auth==2.37.0
+
+# Postgres: per-user system of record (psycopg 3 + a small connection pool).
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.4
+
+# Build the .xlsx export that the bot sends into the chat as a file.
+openpyxl==3.1.5
 
 # Loads .env for local development (no-op in Render, which injects env vars)
 python-dotenv==1.0.1
