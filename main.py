@@ -67,6 +67,22 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # Postgres-backed per-user store (system of record).
 store = Store()
 
+# Money validation shared by the bot, the /api transaction route and the budget
+# endpoints. The store columns are NUMERIC(12,2), so a value must be finite,
+# positive and within range; centralising this keeps a bad number a clean 400 /
+# friendly message instead of a 500 or a wedged conversation.
+MAX_AMOUNT = 9_999_999_999.99  # largest value NUMERIC(12,2) can hold
+
+def clean_amount(amount, label="amount"):
+    """Return `amount` rounded to cents if it's a valid money value, else raise
+    ValueError(message). Rejects None, NaN, ±inf, <= 0, and values past NUMERIC(12,2)."""
+    if amount is None or not math.isfinite(amount) or amount <= 0:
+        raise ValueError(f"{label} must be greater than zero")
+    value = round(amount, 2)
+    if value > MAX_AMOUNT:
+        raise ValueError(f"{label} must be at most {MAX_AMOUNT:,.2f}")
+    return value
+
 # --- TELEGRAM HANDLERS ---
 
 # Conversation states for the add-expense flow
@@ -114,9 +130,10 @@ async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Send an amount to log an expense.\nExample: 12.50")
         return ConversationHandler.END
 
-    amount = float(raw)
-    if amount <= 0:
-        await update.message.reply_text("⚠️ Amount must be greater than zero.")
+    try:
+        amount = clean_amount(float(raw))  # finite, > 0, within NUMERIC(12,2)
+    except ValueError as e:
+        await update.message.reply_text(f"⚠️ {str(e).capitalize()}.")
         return ConversationHandler.END
     # Stash the amount so the later steps can use it
     context.user_data['amount'] = amount
@@ -421,7 +438,24 @@ def build_application():
     application.add_handler(CommandHandler("ban", ban_cmd))
     application.add_handler(CommandHandler("unban", unban_cmd))
     application.add_handler(CommandHandler("stats", stats_cmd))
+
+    application.add_error_handler(on_error)
     return application
+
+
+async def on_error(update, context):
+    """Last-resort handler: log the exception and tell the user instead of leaving
+    them with silence (and a flow flag that would block the nightly clear)."""
+    logging.error("Unhandled error processing update", exc_info=context.error)
+    if not isinstance(update, Update):
+        return
+    if update.effective_chat is not None:
+        ACTIVE_FLOWS.pop(update.effective_chat.id, None)
+    try:
+        if update.effective_message is not None:
+            await update.effective_message.reply_text("⚠️ Something went wrong. Please try again.")
+    except TelegramError:
+        pass
 
 
 application = build_application()
@@ -485,9 +519,12 @@ VALID_TYPES = {"Expense", "Income", "Incoming"}
 
 
 def _require_month(month: str) -> str:
-    """Validate a 'YYYY-MM' month as a real calendar month, else HTTP 400.
-    A plain regex would accept impossible values like 2026-13 or 0000-00,
-    which then blow up downstream in strptime (HTTP 500)."""
+    """Validate a 'YYYY-MM' month as a real calendar month, else HTTP 400. The
+    explicit \\d{4}-\\d{2} check enforces zero-padding — strptime alone accepts
+    '2026-6', which then mismatches the zero-padded months budget_summary groups
+    on and silently reports zero spend."""
+    if not isinstance(month, str) or not re.fullmatch(r"\d{4}-\d{2}", month):
+        raise HTTPException(status_code=400, detail="month must be a valid YYYY-MM")
     try:
         datetime.strptime(month, "%Y-%m")
     except (ValueError, TypeError):
@@ -496,8 +533,11 @@ def _require_month(month: str) -> str:
 
 
 def _require_date(date: str) -> str:
-    """Validate a 'YYYY-MM-DD' date as a real calendar date, else HTTP 400.
-    Rejects well-formed impossibilities like 2026-02-30 or 2026-13-99."""
+    """Validate a 'YYYY-MM-DD' date as a real calendar date, else HTTP 400. The
+    explicit regex enforces zero-padding; strptime then rejects well-formed
+    impossibilities like 2026-02-30 or 2026-13-99."""
+    if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise HTTPException(status_code=400, detail="date must be a valid YYYY-MM-DD")
     try:
         datetime.strptime(date, "%Y-%m-%d")
     except (ValueError, TypeError):
@@ -567,14 +607,16 @@ def api_list(month: str, user_id: int = Depends(require_auth)):
 def api_add(tx: TxIn, user_id: int = Depends(require_auth)):
     if tx.type not in VALID_TYPES:
         raise HTTPException(status_code=400, detail=f"type must be one of {sorted(VALID_TYPES)}")
-    if not (tx.amount > 0):
-        raise HTTPException(status_code=400, detail="amount must be greater than zero")
+    try:
+        amount = clean_amount(tx.amount)  # finite, > 0, within NUMERIC(12,2)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if tx.date is not None:
         _require_date(tx.date)
     created = store.add_transaction(
         user_id,
         tx.type,
-        amount=round(tx.amount, 2),
+        amount=amount,
         name=tx.name.strip(),
         category=tx.category.strip(),
         date=tx.date,
@@ -599,10 +641,11 @@ class BudgetIn(BaseModel):
 
 
 def _require_positive_budget(amount: float) -> float:
-    # Budget cannot be zero or negative (and reject NaN/inf, which slip past `<=`).
-    if amount is None or not math.isfinite(amount) or amount <= 0:
-        raise HTTPException(status_code=400, detail="budget must be greater than zero")
-    return round(amount, 2)
+    # Budget must be finite, > 0 and within NUMERIC(12,2) — same rules as an amount.
+    try:
+        return clean_amount(amount, label="budget")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/api/budget")
