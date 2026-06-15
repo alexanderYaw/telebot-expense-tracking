@@ -299,9 +299,20 @@ function renderAdd() {
   $('#view-add').querySelectorAll('[data-add]').forEach((b) =>
     b.addEventListener('click', () => { STATE.addType = b.dataset.add; renderAdd(); }));
 
-  // wire category chips (only present for expense/recurring)
+  // wire category chips (only present for expense/recurring). Restyle in place
+  // rather than re-rendering the form, which would wipe the amount/name the user
+  // has already typed.
   $('#view-add').querySelectorAll('[data-cat]').forEach((c) =>
-    c.addEventListener('click', () => { STATE.addCategory = c.dataset.cat; renderAdd(); }));
+    c.addEventListener('click', () => {
+      STATE.addCategory = c.dataset.cat;
+      $('#view-add').querySelectorAll('[data-cat]').forEach((chip) => {
+        const active = chip.dataset.cat === STATE.addCategory;
+        chip.classList.toggle('is-active', active);
+        chip.style.cssText = active
+          ? `background:${catColor(chip.dataset.cat)};border-color:${catColor(chip.dataset.cat)};color:#fff`
+          : '';
+      });
+    }));
 
   // wire submit
   const btn = $('#add-submit');
@@ -328,16 +339,16 @@ function categoryField() {
 function addForm(type) {
   if (type === 'expense') {
     return `
-      ${amountField()}
       <div class="field"><label>Name</label><input id="f-name" placeholder="e.g. Lunch — laksa"></div>
+      ${amountField()}
       ${categoryField()}
       <div class="field"><label>Date</label><input id="f-date" type="date" value="${todayISO()}"></div>
       <button id="add-submit" class="btn-primary">Add expense</button>`;
   }
   if (type === 'recurring') {
     return `
-      ${amountField()}
       <div class="field"><label>Name</label><input id="f-name" placeholder="e.g. Phone plan"></div>
+      ${amountField()}
       ${categoryField()}
       <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
       <p class="hint-text">🔁 Logged automatically each month on this day.</p>
@@ -345,16 +356,16 @@ function addForm(type) {
   }
   if (type === 'income') {
     return `
-      ${amountField()}
       <div class="field"><label>Source</label><input id="f-name" placeholder="e.g. Monthly salary"></div>
+      ${amountField()}
       <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
       <p class="hint-text">💰 Recurring monthly income.</p>
       <button id="add-submit" class="btn-primary">Add income</button>`;
   }
   // incoming funds (one-off payment from a person)
   return `
-    ${amountField()}
     <div class="field"><label>From</label><input id="f-name" placeholder="e.g. Dinner split — Wei"></div>
+    ${amountField()}
     <div class="field"><label>Date</label><input id="f-date" type="date" value="${todayISO()}"></div>
     <p class="hint-text">🤝 A payment received from someone else.</p>
     <button id="add-submit" class="btn-primary">Add incoming funds</button>`;
