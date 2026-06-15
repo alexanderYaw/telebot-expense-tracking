@@ -2,9 +2,11 @@ import os
 import re
 import json
 import math
+import time
 import uuid
 import hmac
 import hashlib
+import asyncio
 import logging
 from http import HTTPStatus
 from contextlib import asynccontextmanager
@@ -13,6 +15,7 @@ from urllib.parse import parse_qsl
 import gspread
 from google.oauth2.service_account import Credentials
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import TelegramError, RetryAfter
 from telegram.helpers import escape_markdown
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
@@ -341,12 +344,63 @@ class SheetsHelper:
             "total_savings": round(total_in - total_expense, 2),
         }
 
+    # --- Daily message clear bookmark -----------------------------------
+    # Persists, per chat, the highest message_id already deleted so the nightly
+    # sweep only has to walk that day's new messages (and survives restarts).
+    CLEAR_STATE_SHEET = "ClearState"
+    CLEAR_STATE_HEADER = ["ChatID", "ClearedUpTo"]
+
+    def _clear_state_ws(self, create=False):
+        try:
+            return self.sheet.worksheet(self.CLEAR_STATE_SHEET)
+        except gspread.exceptions.WorksheetNotFound:
+            if not create:
+                return None
+            ws = self.sheet.add_worksheet(
+                title=self.CLEAR_STATE_SHEET, rows="100", cols=str(len(self.CLEAR_STATE_HEADER))
+            )
+            ws.append_row(self.CLEAR_STATE_HEADER)
+            return ws
+
+    def get_cleared_up_to(self, chat_id):
+        ws = self._clear_state_ws()
+        if ws is None:
+            return None
+        for row in ws.get_all_values()[1:]:
+            if len(row) >= 2 and row[0].strip() == str(chat_id):
+                try:
+                    return int(row[1])
+                except (ValueError, TypeError):
+                    return None
+        return None
+
+    def set_cleared_up_to(self, chat_id, message_id):
+        ws = self._clear_state_ws(create=True)
+        for row_num, cell in enumerate(ws.col_values(1)[1:], start=2):
+            if cell.strip() == str(chat_id):
+                ws.update_cell(row_num, 2, message_id)
+                return
+        ws.append_row([str(chat_id), message_id])
+
 db = SheetsHelper()
 
 # --- TELEGRAM HANDLERS ---
 
 # Conversation states for the add-expense flow
 AWAITING_NAME, AWAITING_CATEGORY = range(2)
+
+# Chats currently mid add-expense flow (chat_id -> epoch start time). The nightly
+# clear skips these so it can't wipe an in-progress prompt or its inline keyboard
+# and strand the user. The grace window means an abandoned flow stops blocking the
+# clear after a while (state is in-memory, so a restart resets both anyway).
+ACTIVE_FLOWS: dict[int, float] = {}
+FLOW_GRACE_SECONDS = 900  # 15 min
+
+def _flow_start(update):
+    ACTIVE_FLOWS[update.effective_chat.id] = time.time()
+
+def _flow_end(update):
+    ACTIVE_FLOWS.pop(update.effective_chat.id, None)
 
 async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the add-expense flow by asking for a name. Triggered when the user
@@ -366,6 +420,7 @@ async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     # Stash the amount so the later steps can use it
     context.user_data['amount'] = amount
+    _flow_start(update)  # protect this chat from the nightly clear until done
     await update.message.reply_text(
         f"💵 Amount: ${amount:.2f}\n📝 Please enter details:"
     )
@@ -417,11 +472,13 @@ async def receive_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Replace the button grid with a success message
     await query.edit_message_text(f"✅ Logged: {name} — ${amount:.2f} for {category}")
     context.user_data.clear()
+    _flow_end(update)
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Aborts the add-expense flow."""
     context.user_data.clear()
+    _flow_end(update)
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
@@ -766,6 +823,70 @@ def api_budget_remove(month: str, _auth=Depends(require_auth)):
     _require_month(month)
     db.remove_budget()
     return db.budget_summary(month)
+
+
+# --- DAILY MESSAGE CLEAR ---
+# Triggered by an external cron (e.g. cron-job.org / GitHub Actions) at 00:00
+# SGT, since Render's free tier sleeps and an in-app scheduler would be skipped.
+# Telegram has no "clear chat" call: we delete message_ids one at a time, and
+# only messages < 48h old can be deleted — a daily sweep stays inside that window.
+CLEAR_TASK_TOKEN = os.getenv("CLEAR_TASK_TOKEN")
+# How far back to sweep the very first time for a chat (we have no bookmark yet).
+# Messages older than Telegram's 48h limit simply error out and are skipped.
+FIRST_RUN_LOOKBACK = 500
+
+
+async def clear_chat_messages(chat_id: int) -> int:
+    """Delete recent messages in a private chat. Sends a silent probe to learn the
+    newest message_id, then deletes from the last-cleared bookmark up to it.
+
+    Returns the number deleted, or -1 if skipped because the user is mid add-expense
+    flow (so we don't wipe a live prompt / inline keyboard and strand them)."""
+    started = ACTIVE_FLOWS.get(chat_id)
+    if started is not None and (time.time() - started) < FLOW_GRACE_SECONDS:
+        logging.info("clear: skipping chat %s — add-expense flow in progress", chat_id)
+        return -1
+
+    bot = application.bot
+    try:
+        probe = await bot.send_message(
+            chat_id, "🧹 Clearing today's messages…", disable_notification=True
+        )
+    except TelegramError as e:
+        logging.warning("clear: cannot reach chat %s: %s", chat_id, e)
+        return 0
+
+    newest = probe.message_id
+    cleared_up_to = db.get_cleared_up_to(chat_id)
+    start = (cleared_up_to + 1) if cleared_up_to else max(1, newest - FIRST_RUN_LOOKBACK)
+
+    deleted = 0
+    for mid in range(start, newest + 1):
+        try:
+            if await bot.delete_message(chat_id, mid):
+                deleted += 1
+        except RetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await bot.delete_message(chat_id, mid)
+                deleted += 1
+            except TelegramError:
+                pass
+        except TelegramError:
+            pass  # too old (>48h), already gone, or undeletable — skip it
+    db.set_cleared_up_to(chat_id, newest)
+    return deleted
+
+
+@app.post("/tasks/clear")
+async def api_clear(x_task_token: str = Header(default="")):
+    # Guarded by a shared secret so only the cron job can trigger it. If the token
+    # env var is unset the endpoint is disabled (always 403) rather than open.
+    if not CLEAR_TASK_TOKEN or not hmac.compare_digest(x_task_token, CLEAR_TASK_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    # In private chats chat_id == user_id, so the allowlist *is* the chat list.
+    cleared = {str(cid): await clear_chat_messages(cid) for cid in ALLOWED_USER_IDS}
+    return {"cleared": cleared}
 
 
 # Serve the Mini App's static files. Mounted last so it doesn't shadow the
