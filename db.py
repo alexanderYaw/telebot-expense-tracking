@@ -16,6 +16,10 @@ from psycopg_pool import ConnectionPool
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Seeded for each user the first time their categories are read. After that the
+# list is fully user-editable (add/remove) and stored per user.
+DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
+
 # Neon/Supabase connection strings already carry `sslmode=require`.
 _pool: ConnectionPool | None = None
 
@@ -68,6 +72,14 @@ SCHEMA = [
     CREATE TABLE IF NOT EXISTS clear_state (
         user_id       BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
         cleared_up_to BIGINT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS categories (
+        user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        name    TEXT NOT NULL,
+        seq     BIGSERIAL,
+        PRIMARY KEY (user_id, name)
     )
     """,
 ]
@@ -246,7 +258,7 @@ class Store:
         return [_tx(r) for r in rows]
 
     def edit_transaction(self, user_id: int, entry_id: str, category=None,
-                         amount=None, name=None) -> dict | None:
+                         amount=None, name=None, budget_excluded=None) -> dict | None:
         """Update the given fields of one transaction. Returns the updated row, or None."""
         sets, params = [], []
         if category is not None:
@@ -255,6 +267,8 @@ class Store:
             sets.append("amount = %s"); params.append(amount)
         if name is not None:
             sets.append("name = %s"); params.append(name)
+        if budget_excluded is not None:
+            sets.append("budget_excluded = %s"); params.append(budget_excluded)
         with _get_pool().connection() as conn:
             if not sets:  # nothing to change — just return the current row
                 row = conn.execute(
@@ -269,6 +283,58 @@ class Store:
                     params,
                 ).fetchone()
         return _tx(row) if row else None
+
+    def recurring_transactions(self, user_id: int) -> list[dict]:
+        """A user's recurring EXPENSES, newest first — for the webapp's Recurring
+        section (manage/edit/delete active recurring items). Recurring income is
+        excluded; it's managed from its own flow."""
+        with _get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM transactions WHERE user_id = %s AND recurring "
+                "AND type = 'Expense' ORDER BY seq DESC",
+                (user_id,),
+            ).fetchall()
+        return [_tx(r) for r in rows]
+
+    # --- categories (per user, editable) ----------------------------
+    def get_categories(self, user_id: int) -> list[str]:
+        """The user's categories in order. Lazily seeds DEFAULT_CATEGORIES the first
+        time (user row must already exist — callers ensure_user first)."""
+        with _get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT name FROM categories WHERE user_id = %s ORDER BY seq", (user_id,)
+            ).fetchall()
+            if not rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO categories (user_id, name) VALUES (%s, %s) "
+                        "ON CONFLICT DO NOTHING",
+                        [(user_id, c) for c in DEFAULT_CATEGORIES],
+                    )
+                rows = conn.execute(
+                    "SELECT name FROM categories WHERE user_id = %s ORDER BY seq", (user_id,)
+                ).fetchall()
+        return [r["name"] for r in rows]
+
+    def add_category(self, user_id: int, name: str) -> bool:
+        """Add a category. Returns False if it already existed."""
+        with _get_pool().connection() as conn:
+            row = conn.execute(
+                "INSERT INTO categories (user_id, name) VALUES (%s, %s) "
+                "ON CONFLICT DO NOTHING RETURNING name",
+                (user_id, name),
+            ).fetchone()
+        return row is not None
+
+    def remove_category(self, user_id: int, name: str) -> bool:
+        """Remove a category (existing transactions keep their category text).
+        Returns False if it wasn't there."""
+        with _get_pool().connection() as conn:
+            row = conn.execute(
+                "DELETE FROM categories WHERE user_id = %s AND name = %s RETURNING name",
+                (user_id, name),
+            ).fetchone()
+        return row is not None
 
     def all_transactions(self, user_id: int, since: str | None = None) -> list[dict]:
         """Every transaction for a user (optionally on/after a 'YYYY-MM-DD' date),

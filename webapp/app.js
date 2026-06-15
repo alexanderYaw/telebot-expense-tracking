@@ -34,8 +34,11 @@ if (tg) {
   }
 }
 
-// --- Categories (mirrors CATEGORIES in main.py) with display colors ---
-const CATEGORIES = {
+// --- Category display styles ---
+// Categories are user-editable and loaded from /api into STATE.categories. Known
+// names get a hand-picked colour/icon; custom ones get a deterministic colour from
+// the palette and a generic icon.
+const CAT_STYLE = {
   Food:      { color: '#1faa6c', icon: '🍜' },
   Transport: { color: '#3b82f6', icon: '🚌' },
   Shopping:  { color: '#a855f7', icon: '🛍️' },
@@ -44,8 +47,11 @@ const CATEGORIES = {
   Climbing:  { color: '#ef4444', icon: '🧗' },
   Others:    { color: '#8a909c', icon: '•' },
 };
-const catColor = (c) => (CATEGORIES[c] || CATEGORIES.Others).color;
-const catIcon  = (c) => (CATEGORIES[c] || CATEGORIES.Others).icon;
+const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
+  '#eab308', '#06b6d4', '#f43f5e', '#84cc16', '#6366f1', '#d946ef'];
+function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
+const catColor = (c) => (CAT_STYLE[c] && CAT_STYLE[c].color) || CAT_PALETTE[hashStr(String(c)) % CAT_PALETTE.length];
+const catIcon  = (c) => (CAT_STYLE[c] && CAT_STYLE[c].icon) || '•';
 
 // --- App state ----------------------------------------------------
 // Each tx: {id, date 'YYYY-MM-DD', type, category, amount, name, recurring}
@@ -60,6 +66,10 @@ const STATE = {
   cache: {},                      // { 'YYYY-MM': [tx, ...] }  (undefined = not loaded)
   budget: null,                   // last-fetched budget summary (see API.budgetGet)
   budgetMonth: null,              // the month STATE.budget was computed for
+  categories: [],                 // user's category names (from /api)
+  recurring: null,                // active recurring txs for the Recurring section (null = unloaded)
+  editingId: null,                // id of the recurring tx being edited (else null)
+  editingTx: null,                // the recurring tx object being edited (for prefill)
   loading: false,
   error: null,
 };
@@ -93,6 +103,37 @@ const API = {
       method: 'DELETE', headers: this.headers(),
     });
     if (!r.ok) throw new Error(`Delete failed (${r.status})`);
+  },
+  async edit(id, patch) {
+    const r = await fetch(`/api/transactions/${id}`, {
+      method: 'PATCH', headers: this.headers(), body: JSON.stringify(patch),
+    });
+    if (!r.ok) throw new Error(await detail(r) || `Edit failed (${r.status})`);
+    return (await r.json()).transaction;
+  },
+  async recurring() {
+    const r = await fetch('/api/recurring', { headers: this.headers() });
+    if (!r.ok) throw new Error(`Load failed (${r.status})`);
+    return (await r.json()).transactions;
+  },
+  async categories() {
+    const r = await fetch('/api/categories', { headers: this.headers() });
+    if (!r.ok) throw new Error(`Load failed (${r.status})`);
+    return (await r.json()).categories;
+  },
+  async categoryAdd(name) {
+    const r = await fetch('/api/categories', {
+      method: 'POST', headers: this.headers(), body: JSON.stringify({ name }),
+    });
+    if (!r.ok) throw new Error(await detail(r) || `Add failed (${r.status})`);
+    return (await r.json()).categories;
+  },
+  async categoryRemove(name) {
+    const r = await fetch(`/api/categories/${encodeURIComponent(name)}`, {
+      method: 'DELETE', headers: this.headers(),
+    });
+    if (!r.ok) throw new Error(`Remove failed (${r.status})`);
+    return (await r.json()).categories;
   },
   // Budget summary for `month`: { budget, left, spent_this_month, overall_surplus,
   // total_savings }. budget/left are null when no budget applies to that month.
@@ -134,9 +175,36 @@ async function ensureMonth(ym, { force = false } = {}) {
 
 function invalidate(ym) { delete STATE.cache[ym]; }
 
+// Pull FastAPI's {detail: "..."} message out of an error response, if present.
+async function detail(r) {
+  try { return (await r.clone().json()).detail; } catch (_) { return ''; }
+}
+
 // Budget totals span every month, so any add/delete can change the surplus and
 // savings — force the next ensureBudget to refetch.
 function invalidateBudget() { STATE.budgetMonth = null; }
+
+// Load the user's categories once (kept in sync directly on add/remove).
+async function ensureCategories({ force = false } = {}) {
+  if (!force && STATE.categories.length) return;
+  try {
+    STATE.categories = await API.categories();
+    if (!STATE.categories.includes(STATE.addCategory)) STATE.addCategory = STATE.categories[0] || '';
+  } catch (e) {
+    STATE.error = e.message || 'Could not load categories';
+  }
+}
+
+// Load the active recurring transactions for the Recurring section.
+async function ensureRecurring({ force = false } = {}) {
+  if (!force && STATE.recurring) return;
+  try {
+    STATE.recurring = await API.recurring();
+  } catch (e) {
+    STATE.error = e.message || 'Could not load recurring';
+    STATE.recurring = STATE.recurring || [];
+  }
+}
 
 // Load the budget summary for `ym` if we don't already have it for that month.
 async function ensureBudget(ym, { force = false } = {}) {
@@ -279,17 +347,11 @@ function budgetCard(t) {
   }
   const left = b.left;                       // budget − spent (negative = overspent)
   const over = left < 0;
-  const surplus = b.overall_surplus;         // cumulative across months (may be null)
-  const surplusHtml = surplus == null ? '' : `
-      <div class="budget-surplus">Overall budget surplus:
-        <span class="${surplus < 0 ? 'neg' : 'pos'}">${surplus < 0 ? '−' : '+'}${money(Math.abs(surplus))}</span>
-      </div>`;
   return `
     <div class="card">
       <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount ${over ? 'neg' : 'pos'}">${over ? '−' : ''}${money(Math.abs(left))}</div>
       <div class="sub">${over ? 'over budget' : 'left to spend'} · ${money(b.spent_this_month)} of ${money(b.budget)} used</div>
-      ${surplusHtml}
     </div>`;
 }
 
@@ -312,13 +374,40 @@ function renderAdd() {
     `<button data-add="${a.key}" class="${STATE.addType === a.key ? 'is-active' : ''}">${a.label}</button>`
   ).join('');
 
+  // The Recurring section also lists every active recurring expense to edit/delete.
+  const recurringList = STATE.addType === 'recurring'
+    ? `<div class="card"><p class="card-title">Active recurring expenses</p>${recurringListBody()}</div>`
+    : '';
+
   $('#view-add').innerHTML = `
     <div class="segmented">${seg}</div>
-    <div class="card">${addForm(STATE.addType)}</div>`;
+    <div class="card">${addForm(STATE.addType)}</div>
+    ${recurringList}`;
 
-  // wire segmented control
+  // Lazy-load the recurring list the first time the section is opened.
+  if (STATE.addType === 'recurring' && STATE.recurring === null) {
+    ensureRecurring().then(() => {
+      if (STATE.activeTab === 'add' && STATE.addType === 'recurring') renderAdd();
+    });
+  }
+
+  // wire segmented control (switching type cancels any in-progress edit)
   $('#view-add').querySelectorAll('[data-add]').forEach((b) =>
-    b.addEventListener('click', () => { STATE.addType = b.dataset.add; renderAdd(); }));
+    b.addEventListener('click', () => {
+      STATE.addType = b.dataset.add;
+      STATE.editingId = null; STATE.editingTx = null;
+      renderAdd();
+    }));
+
+  // wire "edit" on a recurring row → prefill the form in update mode
+  $('#view-add').querySelectorAll('[data-edit]').forEach((b) =>
+    b.addEventListener('click', () => startEditRecurring(b.dataset.edit)));
+
+  // wire "cancel edit"
+  const cancelEdit = $('#edit-cancel');
+  if (cancelEdit) cancelEdit.addEventListener('click', () => {
+    STATE.editingId = null; STATE.editingTx = null; renderAdd();
+  });
 
   // wire category chips (only present for expense/recurring). Restyle in place
   // rather than re-rendering the form, which would wipe the amount/name the user
@@ -349,28 +438,60 @@ function amountField() {
 }
 
 function categoryField() {
-  const chips = Object.keys(CATEGORIES).map((c) => {
+  const chips = STATE.categories.map((c) => {
     const active = STATE.addCategory === c;
     const style = active ? `background:${catColor(c)};border-color:${catColor(c)};color:#fff` : '';
-    return `<button data-cat="${c}" class="chip ${active ? 'is-active' : ''}" style="${style}">${catIcon(c)} ${c}</button>`;
+    return `<button data-cat="${escapeHtml(c)}" class="chip ${active ? 'is-active' : ''}" style="${style}">${catIcon(c)} ${escapeHtml(c)}</button>`;
   }).join('');
-  return `<div class="field"><label>Category</label><div class="cat-grid">${chips}</div></div>`;
+  const note = STATE.categories.length ? '' : `<p class="hint-text">No categories yet — add some in the Categories tab.</p>`;
+  return `<div class="field"><label>Category</label><div class="cat-grid">${chips}</div>${note}</div>`;
 }
 
 // Toggle to keep a big-ticket expense out of the monthly budget. Expense/recurring
 // only — the bot's messaging flow has no such option (everything counts there).
 // Defaults OFF (counts toward budget) on every fresh form, so the exclusion is a
 // deliberate per-entry choice that doesn't carry over to the next expense.
-function excludeField() {
+function excludeField(checked = false) {
   return `
     <label class="switch-field">
       <span class="switch-label">Exclude from monthly budget</span>
       <span class="switch">
-        <input id="f-exclude" type="checkbox">
+        <input id="f-exclude" type="checkbox" ${checked ? 'checked' : ''}>
         <span class="slider"></span>
       </span>
     </label>
     <p class="hint-text">For big-ticket items you don't want counted against your budget. Still shows in total spending.</p>`;
+}
+
+// A recurring expense row in the Recurring section, with edit + delete buttons.
+function recurringRow(t) {
+  return `
+    <div class="tx">
+      <div class="tx-icon" style="background:${catColor(t.category)}22;color:${catColor(t.category)}">${catIcon(t.category)}</div>
+      <div class="tx-main">
+        <div class="tx-name">${escapeHtml(t.name || '(no name)')}</div>
+        <div class="tx-sub"><span class="pill" style="background:${catColor(t.category)}">${escapeHtml(t.category)}</span>${t.budget_excluded ? ' · <span class="off-budget">off-budget</span>' : ''}</div>
+      </div>
+      <div class="tx-amt">${money(t.amount)}</div>
+      <button class="tx-edit" data-edit="${escapeHtml(t.id || '')}" aria-label="Edit" title="Edit">✎</button>
+      <button class="tx-del" data-del="${escapeHtml(t.id || '')}" data-month="${(t.date || '').slice(0, 7)}" data-recurring="1" aria-label="Delete" title="Delete">✕</button>
+    </div>`;
+}
+
+function recurringListBody() {
+  if (STATE.recurring === null) return `<div class="banner">Loading…</div>`;
+  if (!STATE.recurring.length) return emptyInline('No recurring expenses yet');
+  return STATE.recurring.map(recurringRow).join('');
+}
+
+function startEditRecurring(id) {
+  const tx = (STATE.recurring || []).find((t) => t.id === id);
+  if (!tx) return;
+  STATE.editingId = id;
+  STATE.editingTx = tx;
+  STATE.addCategory = tx.category;
+  renderAdd();
+  $('.view').scrollTop = 0;
 }
 
 function addForm(type) {
@@ -384,20 +505,21 @@ function addForm(type) {
       <button id="add-submit" class="btn-primary">Add expense</button>`;
   }
   if (type === 'recurring') {
+    const e = STATE.editingTx;  // set when editing an existing recurring item
+    const nameVal = e ? escapeHtml(e.name || '') : '';
+    const amtVal = e ? e.amount : '';
     return `
-      <div class="field"><label>Name</label><input id="f-name" placeholder="e.g. Phone plan"></div>
-      ${amountField()}
+      <div class="field"><label>Name</label><input id="f-name" placeholder="e.g. Phone plan" value="${nameVal}"></div>
+      <div class="field"><label>Amount</label><div class="amount-input"><span>$</span><input id="f-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${amtVal}"></div></div>
       ${categoryField()}
-      <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
-      ${excludeField()}
-      <p class="hint-text">Logged automatically each month on this day.</p>
-      <button id="add-submit" class="btn-primary">Add recurring expense</button>`;
+      ${excludeField(e ? e.budget_excluded : false)}
+      <button id="add-submit" class="btn-primary">${e ? 'Update recurring expense' : 'Add recurring expense'}</button>
+      ${e ? `<button id="edit-cancel" class="btn-secondary">Cancel edit</button>` : ''}`;
   }
   if (type === 'income') {
     return `
       <div class="field"><label>Source</label><input id="f-name" placeholder="e.g. Monthly salary"></div>
       ${amountField()}
-      <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
       <p class="hint-text">Recurring monthly income.</p>
       <button id="add-submit" class="btn-primary">Add income</button>`;
   }
@@ -416,19 +538,37 @@ async function onAddSubmit() {
   const amount = parseFloat(($('#f-amount') || {}).value);
   if (!amount || amount <= 0) { toast('⚠️ Enter an amount greater than 0'); return; }
   const name = (($('#f-name') || {}).value || '').trim();
-  const date = (($('#f-date') || {}).value) || todayISO();
   const type = STATE.addType;
-
-  // Only expense/recurring forms show the exclude toggle.
   const budgetExcluded = !!(($('#f-exclude') || {}).checked);
+  const btn = $('#add-submit');
 
+  // Editing an existing recurring expense → PATCH instead of inserting.
+  if (type === 'recurring' && STATE.editingId) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      await API.edit(STATE.editingId, { category: STATE.addCategory, name, amount, budget_excluded: budgetExcluded });
+      STATE.editingId = null; STATE.editingTx = null;
+      STATE.recurring = null;   // reload the list
+      STATE.cache = {};         // the edited row may be in any month
+      invalidateBudget();
+      haptic('success');
+      toast('✅ Updated');
+      renderAdd();
+    } catch (e) {
+      haptic('error');
+      toast('⚠️ ' + (e.message || 'Could not save'));
+      if (btn) { btn.disabled = false; btn.textContent = 'Update recurring expense'; }
+    }
+    return;
+  }
+
+  const date = (($('#f-date') || {}).value) || todayISO();
   let tx;
   if (type === 'expense')   tx = { date, type: 'Expense',  category: STATE.addCategory, amount, name, budget_excluded: budgetExcluded };
-  else if (type === 'recurring') tx = { date: STATE.month + '-' + pad(($('#f-day')||{}).value), type: 'Expense', category: STATE.addCategory, amount, name, recurring: true, budget_excluded: budgetExcluded };
-  else if (type === 'income')    tx = { date: STATE.month + '-' + pad(($('#f-day')||{}).value), type: 'Income', category: 'Salary', amount, name, recurring: true };
+  else if (type === 'recurring') tx = { date: todayISO(), type: 'Expense', category: STATE.addCategory, amount, name, recurring: true, budget_excluded: budgetExcluded };
+  else if (type === 'income')    tx = { date: todayISO(), type: 'Income', category: 'Salary', amount, name, recurring: true };
   else                      tx = { date, type: 'Incoming', category: 'Transfer', amount, name };
 
-  const btn = $('#add-submit');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   try {
     const created = await API.add(tx);
@@ -436,6 +576,7 @@ async function onAddSubmit() {
     const ym = (created.date || tx.date).slice(0, 7);
     if (STATE.cache[ym]) STATE.cache[ym].push(created); else invalidate(ym);
     invalidateBudget();           // surplus/savings/left changed
+    if (tx.recurring) STATE.recurring = null;  // new recurring → reload its list
     haptic('success');
     toast('✅ Added ' + money(amount));
     STATE.month = ym;
@@ -453,7 +594,6 @@ async function onAddSubmit() {
 function haptic(kind) {
   try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred(kind); } catch (_) {}
 }
-function pad(d) { return String(Math.max(1, Math.min(28, Number(d) || 1))).padStart(2, '0'); }
 
 // ============================================================
 //  VIEW: HISTORY  (expenses by month)
@@ -505,9 +645,9 @@ function renderCategories() {
   const maxCat = Math.max(1, ...Object.values(byCat));
   const totalSpent = Object.values(byCat).reduce((a, b) => a + b, 0);
 
-  const filterCats = ['All', ...Object.keys(CATEGORIES)];
+  const filterCats = ['All', ...STATE.categories];
   const chips = filterCats.map((c) =>
-    `<button class="chip ${STATE.categoryFilter === c ? 'is-active' : ''}" data-filter="${c}">${c}</button>`
+    `<button class="chip ${STATE.categoryFilter === c ? 'is-active' : ''}" data-filter="${escapeHtml(c)}">${escapeHtml(c)}</button>`
   ).join('');
 
   const filtered = STATE.categoryFilter === 'All' ? rows : rows.filter((r) => r.category === STATE.categoryFilter);
@@ -518,6 +658,20 @@ function renderCategories() {
       <div class="bar-track"><div class="bar-fill" style="width:${(v / maxCat) * 100}%;background:${catColor(c)}"></div></div>
     </div>`).join('');
 
+  // Manage (add / remove) the user's categories.
+  const tags = STATE.categories.map((c) =>
+    `<span class="cat-tag" style="border-color:${catColor(c)}">${catIcon(c)} ${escapeHtml(c)}<button class="cat-x" data-rmcat="${escapeHtml(c)}" aria-label="Remove">✕</button></span>`
+  ).join('');
+  const manageCard = `
+    <div class="card">
+      <p class="card-title">Manage categories</p>
+      <div class="cat-manage">
+        <input id="new-cat" placeholder="New category" maxlength="24">
+        <button id="add-cat" class="btn-mini">Add</button>
+      </div>
+      <div class="cat-list">${tags || '<span class="sub">No categories yet.</span>'}</div>
+    </div>`;
+
   $('#view-categories').innerHTML = `
     ${statusBanner()}
     <div class="chips">${chips}</div>
@@ -527,12 +681,51 @@ function renderCategories() {
         ${breakdown || emptyInline('No expenses this month')}
       </div>` : `
       <div class="card">
-        <p class="card-title">${STATE.categoryFilter} · ${money(filtered.reduce((a, r) => a + r.amount, 0))}</p>
+        <p class="card-title">${escapeHtml(STATE.categoryFilter)} · ${money(filtered.reduce((a, r) => a + r.amount, 0))}</p>
         ${filtered.length ? filtered.map(txRow).join('') : emptyInline('Nothing in ' + STATE.categoryFilter)}
-      </div>`}`;
+      </div>`}
+    ${manageCard}`;
 
   $('#view-categories').querySelectorAll('[data-filter]').forEach((b) =>
     b.addEventListener('click', () => { STATE.categoryFilter = b.dataset.filter; renderCategories(); }));
+
+  const addCat = $('#add-cat');
+  if (addCat) addCat.addEventListener('click', onCategoryAdd);
+  const newCat = $('#new-cat');
+  if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
+  $('#view-categories').querySelectorAll('[data-rmcat]').forEach((b) =>
+    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat)));
+}
+
+async function onCategoryAdd() {
+  const input = $('#new-cat');
+  const name = (input && input.value || '').trim();
+  if (!name) { toast('⚠️ Enter a category name'); return; }
+  try {
+    STATE.categories = await API.categoryAdd(name);
+    haptic('success');
+    renderCategories();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Could not add'));
+  }
+}
+
+async function onCategoryRemove(name) {
+  const ok = (tg && tg.showConfirm)
+    ? await new Promise((res) => tg.showConfirm(`Remove category "${name}"? Past expenses keep it.`, res))
+    : window.confirm(`Remove category "${name}"?`);
+  if (!ok) return;
+  try {
+    STATE.categories = await API.categoryRemove(name);
+    if (STATE.categoryFilter === name) STATE.categoryFilter = 'All';
+    if (STATE.addCategory === name) STATE.addCategory = STATE.categories[0] || '';
+    haptic('success');
+    renderCategories();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Could not remove'));
+  }
 }
 
 // ============================================================
@@ -552,6 +745,12 @@ function renderBudget() {
       <div class="sub">All income minus all expenses, across every month</div>
     </div>
 
+    <div class="card hero ${surplus != null && surplus < 0 ? 'hero-neg' : ''}">
+      <p class="card-title">Overall budget surplus</p>
+      <div class="amount">${surplus == null ? '—' : (surplus < 0 ? '−' : '+') + money(Math.abs(surplus))}</div>
+      <div class="sub">Budget minus spending, summed across every budgeted month</div>
+    </div>
+
     <div class="card">
       <p class="card-title">Monthly budget</p>
       <div class="field">
@@ -561,10 +760,6 @@ function renderBudget() {
       <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
       <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
       ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
-      ${hasBudget && surplus != null ? `
-        <div class="budget-surplus" style="margin-top:14px">Overall budget surplus:
-          <span class="${surplus < 0 ? 'neg' : 'pos'}">${surplus < 0 ? '−' : '+'}${money(Math.abs(surplus))}</span>
-        </div>` : ''}
     </div>`;
 
   const save = $('#b-save');
@@ -663,11 +858,14 @@ $('#app').addEventListener('click', async (e) => {
   const ok = (tg && tg.showConfirm)
     ? await new Promise((res) => tg.showConfirm('Delete this entry?', res))
     : window.confirm('Delete this entry?');
-  if (!ok) return;
+  // Cancelled → repaint the current view so the row returns to its normal state.
+  if (!ok) { RENDERERS[STATE.activeTab](); return; }
   del.disabled = true;
   try {
     await API.remove(id, month);
     invalidate(month);
+    invalidateBudget();
+    if (del.dataset.recurring) STATE.recurring = null;  // reload the recurring list
     haptic('success');
     toast('🗑️ Deleted');
     await refreshActive();
@@ -678,11 +876,47 @@ $('#app').addEventListener('click', async (e) => {
   }
 });
 
-// Initial load: keep the full-screen loader up until the first month's data has
-// been fetched and Home has painted, then reveal the app.
+// Elastic "jelly" overscroll: when the scroll container is dragged past its top or
+// bottom edge, translate the content with damping, then spring back on release.
+// (Native rubber-banding is suppressed inside the Mini App, so we add our own.)
+function enableJelly(el) {
+  let startY = 0, pulling = false, atTop = false;
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    startY = e.touches[0].clientY;
+    pulling = true;
+    atTop = el.scrollTop <= 0;
+  }, { passive: true });
+  el.addEventListener('touchmove', (e) => {
+    if (!pulling) return;
+    const dy = e.touches[0].clientY - startY;
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
+    // Only when pulling further past an edge the scroller can't move.
+    if ((atTop && dy > 0) || (atBottom && dy < 0)) {
+      const damped = Math.sign(dy) * Math.min(80, Math.pow(Math.abs(dy), 0.8));
+      el.style.transition = 'none';
+      el.style.transform = `translateY(${damped}px)`;
+    }
+  }, { passive: true });
+  const release = () => {
+    if (!pulling) return;
+    pulling = false;
+    if (el.style.transform && el.style.transform !== 'translateY(0px)') {
+      el.style.transition = 'transform .32s cubic-bezier(.22,1.2,.36,1)';
+      el.style.transform = 'translateY(0px)';
+    }
+  };
+  el.addEventListener('touchend', release, { passive: true });
+  el.addEventListener('touchcancel', release, { passive: true });
+}
+
+// Initial load: keep the full-screen loader up until categories + the first
+// month's data have been fetched and Home has painted, then reveal the app.
 syncMonthPill();
+enableJelly($('.view'));
 (async () => {
   try {
+    await ensureCategories();
     await switchTab('home');
   } finally {
     const loader = $('#loader');

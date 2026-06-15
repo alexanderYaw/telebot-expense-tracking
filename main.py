@@ -58,9 +58,6 @@ DEV_USER_ID = int(os.getenv("DEV_USER_ID", str(next(iter(ADMIN_USER_IDS), 0))))
 if not TELEGRAM_TOKEN:
     raise ValueError("No TELEGRAM_TOKEN found in .env file.")
 
-# Define your custom categories here
-CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
-
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -82,6 +79,15 @@ def clean_amount(amount, label="amount"):
     if value > MAX_AMOUNT:
         raise ValueError(f"{label} must be at most {MAX_AMOUNT:,.2f}")
     return value
+
+# '|' is the bot's category callback_data delimiter, so disallow it; keep names
+# short enough to stay well under Telegram's 64-byte callback_data limit.
+def clean_category(name):
+    """Return a trimmed category name, or raise ValueError if invalid."""
+    name = (name or "").strip()
+    if not name or len(name) > 24 or "|" in name or "\n" in name:
+        raise ValueError("category must be 1–24 characters and not contain '|'")
+    return name
 
 # --- TELEGRAM HANDLERS ---
 
@@ -149,10 +155,10 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['name'] = name
     amount = context.user_data['amount']
 
-    # Build the button grid dynamically from the CATEGORIES list
+    # Build the button grid dynamically from this user's categories
     keyboard = []
     row = []
-    for cat in CATEGORIES:
+    for cat in store.get_categories(update.effective_user.id):
         # Only the category travels in the callback_data; name/amount live in user_data
         callback_data = f"setcat|{cat}"
         row.append(InlineKeyboardButton(cat, callback_data=callback_data))
@@ -600,7 +606,10 @@ async def telegram_webhook(request: Request):
 @app.get("/api/transactions")
 def api_list(month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
-    return {"transactions": store.get_month(user_id, month), "categories": CATEGORIES}
+    return {
+        "transactions": store.get_month(user_id, month),
+        "categories": store.get_categories(user_id),
+    }
 
 
 @app.post("/api/transactions")
@@ -634,6 +643,62 @@ def api_delete(entry_id: str, month: str, user_id: int = Depends(require_auth)):
     if not deleted:
         raise HTTPException(status_code=404, detail="No entry with that id")
     return {"deleted": deleted}
+
+
+class TxEdit(BaseModel):
+    category: str | None = None
+    name: str | None = None
+    amount: float | None = None
+    budget_excluded: bool | None = None
+
+
+@app.patch("/api/transactions/{entry_id}")
+def api_edit(entry_id: str, tx: TxEdit, user_id: int = Depends(require_auth)):
+    amount = None
+    if tx.amount is not None:
+        try:
+            amount = clean_amount(tx.amount)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    category = tx.category.strip() if tx.category is not None else None
+    name = tx.name.strip() if tx.name is not None else None
+    updated = store.edit_transaction(
+        user_id, entry_id, category=category, amount=amount, name=name,
+        budget_excluded=tx.budget_excluded,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="No entry with that id")
+    return {"transaction": updated}
+
+
+@app.get("/api/recurring")
+def api_recurring(user_id: int = Depends(require_auth)):
+    return {"transactions": store.recurring_transactions(user_id)}
+
+
+@app.get("/api/categories")
+def api_categories(user_id: int = Depends(require_auth)):
+    return {"categories": store.get_categories(user_id)}
+
+
+class CategoryIn(BaseModel):
+    name: str
+
+
+@app.post("/api/categories")
+def api_category_add(c: CategoryIn, user_id: int = Depends(require_auth)):
+    try:
+        name = clean_category(c.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    store.add_category(user_id, name)
+    return {"categories": store.get_categories(user_id)}
+
+
+@app.delete("/api/categories/{name}")
+def api_category_remove(name: str, user_id: int = Depends(require_auth)):
+    store.remove_category(user_id, name)
+    return {"categories": store.get_categories(user_id)}
 
 
 class BudgetIn(BaseModel):
