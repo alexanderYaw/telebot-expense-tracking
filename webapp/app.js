@@ -403,11 +403,13 @@ function renderAdd() {
   $('#view-add').querySelectorAll('[data-edit]').forEach((b) =>
     b.addEventListener('click', () => startEditRecurring(b.dataset.edit)));
 
-  // wire "cancel edit"
+  // wire "cancel edit" / "delete" inside the edit form
   const cancelEdit = $('#edit-cancel');
   if (cancelEdit) cancelEdit.addEventListener('click', () => {
     STATE.editingId = null; STATE.editingTx = null; renderAdd();
   });
+  const editDelete = $('#edit-delete');
+  if (editDelete) editDelete.addEventListener('click', onRecurringDelete);
 
   // wire category chips (only present for expense/recurring). Restyle in place
   // rather than re-rendering the form, which would wipe the amount/name the user
@@ -463,18 +465,18 @@ function excludeField(checked = false) {
     <p class="hint-text">For big-ticket items you don't want counted against your budget. Still shows in total spending.</p>`;
 }
 
-// A recurring expense row in the Recurring section, with edit + delete buttons.
+// A recurring expense row. Tapping anywhere on the card opens it for editing
+// (edit/delete live inside that form) — no per-row icons.
 function recurringRow(t) {
   return `
-    <div class="tx">
+    <div class="tx tappable" data-edit="${escapeHtml(t.id || '')}" role="button" tabindex="0">
       <div class="tx-icon" style="background:${catColor(t.category)}22;color:${catColor(t.category)}">${catIcon(t.category)}</div>
       <div class="tx-main">
         <div class="tx-name">${escapeHtml(t.name || '(no name)')}</div>
         <div class="tx-sub"><span class="pill" style="background:${catColor(t.category)}">${escapeHtml(t.category)}</span>${t.budget_excluded ? ' · <span class="off-budget">off-budget</span>' : ''}</div>
       </div>
       <div class="tx-amt">${money(t.amount)}</div>
-      <button class="tx-edit" data-edit="${escapeHtml(t.id || '')}" aria-label="Edit" title="Edit">✎</button>
-      <button class="tx-del" data-del="${escapeHtml(t.id || '')}" data-month="${(t.date || '').slice(0, 7)}" data-recurring="1" aria-label="Delete" title="Delete">✕</button>
+      <span class="tx-chevron" aria-hidden="true">›</span>
     </div>`;
 }
 
@@ -492,6 +494,29 @@ function startEditRecurring(id) {
   STATE.addCategory = tx.category;
   renderAdd();
   $('.view').scrollTop = 0;
+}
+
+async function onRecurringDelete() {
+  if (!STATE.editingId || !STATE.editingTx) return;
+  const ok = (tg && tg.showConfirm)
+    ? await new Promise((res) => tg.showConfirm('Delete this recurring expense?', res))
+    : window.confirm('Delete this recurring expense?');
+  if (!ok) return;
+  const id = STATE.editingId;
+  const month = (STATE.editingTx.date || '').slice(0, 7);
+  try {
+    await API.remove(id, month);
+    STATE.editingId = null; STATE.editingTx = null;
+    STATE.recurring = null;   // reload the list
+    STATE.cache = {};
+    invalidateBudget();
+    haptic('success');
+    toast('🗑️ Deleted');
+    renderAdd();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Delete failed'));
+  }
 }
 
 function addForm(type) {
@@ -514,7 +539,8 @@ function addForm(type) {
       ${categoryField()}
       ${excludeField(e ? e.budget_excluded : false)}
       <button id="add-submit" class="btn-primary">${e ? 'Update recurring expense' : 'Add recurring expense'}</button>
-      ${e ? `<button id="edit-cancel" class="btn-secondary">Cancel edit</button>` : ''}`;
+      ${e ? `<button id="edit-delete" class="btn-secondary">Delete recurring expense</button>
+      <button id="edit-cancel" class="btn-ghost">Cancel edit</button>` : ''}`;
   }
   if (type === 'income') {
     return `
@@ -745,7 +771,7 @@ function renderBudget() {
       <div class="sub">All income minus all expenses, across every month</div>
     </div>
 
-    <div class="card hero ${surplus != null && surplus < 0 ? 'hero-neg' : ''}">
+    <div class="card hero ${surplus == null ? '' : (surplus < 0 ? 'hero-neg' : 'hero-pos')}">
       <p class="card-title">Overall budget surplus</p>
       <div class="amount">${surplus == null ? '—' : (surplus < 0 ? '−' : '+') + money(Math.abs(surplus))}</div>
       <div class="sub">Budget minus spending, summed across every budgeted month</div>
@@ -876,44 +902,9 @@ $('#app').addEventListener('click', async (e) => {
   }
 });
 
-// Elastic "jelly" overscroll: when the scroll container is dragged past its top or
-// bottom edge, translate the content with damping, then spring back on release.
-// (Native rubber-banding is suppressed inside the Mini App, so we add our own.)
-function enableJelly(el) {
-  let startY = 0, pulling = false, atTop = false;
-  el.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) return;
-    startY = e.touches[0].clientY;
-    pulling = true;
-    atTop = el.scrollTop <= 0;
-  }, { passive: true });
-  el.addEventListener('touchmove', (e) => {
-    if (!pulling) return;
-    const dy = e.touches[0].clientY - startY;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-    // Only when pulling further past an edge the scroller can't move.
-    if ((atTop && dy > 0) || (atBottom && dy < 0)) {
-      const damped = Math.sign(dy) * Math.min(80, Math.pow(Math.abs(dy), 0.8));
-      el.style.transition = 'none';
-      el.style.transform = `translateY(${damped}px)`;
-    }
-  }, { passive: true });
-  const release = () => {
-    if (!pulling) return;
-    pulling = false;
-    if (el.style.transform && el.style.transform !== 'translateY(0px)') {
-      el.style.transition = 'transform .32s cubic-bezier(.22,1.2,.36,1)';
-      el.style.transform = 'translateY(0px)';
-    }
-  };
-  el.addEventListener('touchend', release, { passive: true });
-  el.addEventListener('touchcancel', release, { passive: true });
-}
-
 // Initial load: keep the full-screen loader up until categories + the first
 // month's data have been fetched and Home has painted, then reveal the app.
 syncMonthPill();
-enableJelly($('.view'));
 (async () => {
   try {
     await ensureCategories();

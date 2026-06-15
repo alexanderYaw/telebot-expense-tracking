@@ -14,8 +14,6 @@ from datetime import datetime, date as date_cls
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-
 # Seeded for each user the first time their categories are read. After that the
 # list is fully user-editable (add/remove) and stored per user.
 DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
@@ -27,10 +25,13 @@ _pool: ConnectionPool | None = None
 def _get_pool() -> ConnectionPool:
     global _pool
     if _pool is None:
-        if not DATABASE_URL:
+        # Read at first use, not import time — main.py imports this module before
+        # it calls load_dotenv(), so the env var isn't set yet during import.
+        dsn = os.getenv("DATABASE_URL")
+        if not dsn:
             raise RuntimeError("DATABASE_URL is not set")
         _pool = ConnectionPool(
-            DATABASE_URL, min_size=1, max_size=5, kwargs={"row_factory": dict_row}
+            dsn, min_size=1, max_size=5, kwargs={"row_factory": dict_row}
         )
     return _pool
 

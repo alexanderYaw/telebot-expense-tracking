@@ -320,7 +320,8 @@ html, body {
 .budget-surplus .pos { color: var(--pos); }
 .budget-surplus .neg { color: var(--neg); }
 
-/* Negative overall-surplus hero (Budget tab) turns red instead of accent */
+/* Overall-surplus hero (Budget tab): green when in surplus, red when negative */
+.hero.hero-pos { background: var(--pos); }
 .hero.hero-neg { background: var(--neg); }
 
 /* ---------- Category management (Categories tab) ---------- */
@@ -364,22 +365,24 @@ html, body {
 }
 .cat-x:hover { color: var(--neg); }
 
-/* Edit (✎) button on a recurring row */
-.tx-edit {
-  flex: 0 0 auto;
-  width: 28px; height: 28px;
-  margin-left: 2px;
+/* Tappable recurring row (whole card opens the edit form) */
+.tx.tappable { cursor: pointer; }
+.tx.tappable:active { opacity: 0.6; }
+.tx-chevron { flex: 0 0 auto; color: var(--hint); font-size: 20px; line-height: 1; margin-left: 4px; }
+
+/* Tertiary "ghost" button (e.g. Cancel edit) */
+.btn-ghost {
+  width: 100%;
   border: none;
-  border-radius: 8px;
   background: transparent;
   color: var(--hint);
-  font-size: 14px;
-  line-height: 1;
+  font: inherit; font-weight: 700; font-size: 15px;
+  padding: 12px;
+  border-radius: 14px;
   cursor: pointer;
-  opacity: 0.65;
-  transition: background .12s, color .12s, opacity .12s;
+  margin-top: 6px;
 }
-.tx-edit:hover { background: var(--accent); color: var(--accent-ink); opacity: 1; }
+.btn-ghost:active { opacity: .7; }
 
 /* ---------- Empty state ---------- */
 .empty { text-align: center; color: var(--hint); padding: 48px 20px; }
