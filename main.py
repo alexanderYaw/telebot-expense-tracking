@@ -80,7 +80,7 @@ class SheetsHelper:
             return Credentials.from_service_account_info(info, scopes=scopes)
         return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
 
-    HEADER = ["ID", "Date", "Type", "Category", "Amount", "Notes", "Recurring"]
+    HEADER = ["ID", "Date", "Type", "Category", "Amount", "Notes", "Recurring", "BudgetExcluded"]
 
     @staticmethod
     def _title_for_month(ym: str) -> str:
@@ -102,7 +102,8 @@ class SheetsHelper:
         ws = self._get_current_month_worksheet()
         entry_id = str(uuid.uuid4())[:8]
         date_str = datetime.now().strftime("%Y-%m-%d")
-        ws.append_row([entry_id, date_str, "Expense", category, amount, name, ""])
+        # Expenses added via the bot always count toward the budget (no exclude option).
+        ws.append_row([entry_id, date_str, "Expense", category, amount, name, "", ""])
         return entry_id
 
     def list_expenses(self):
@@ -173,10 +174,13 @@ class SheetsHelper:
 
     @staticmethod
     def _to_web_tx(row):
-        """Maps a positional worksheet row to the shape the webapp expects.
-        Columns: 0=ID 1=Date 2=Type 3=Category 4=Amount 5=Notes 6=Recurring."""
+        """Maps a positional worksheet row to the shape the webapp expects. Columns:
+        0=ID 1=Date 2=Type 3=Category 4=Amount 5=Notes 6=Recurring 7=BudgetExcluded."""
         def cell(i):
             return row[i] if len(row) > i else ""
+
+        def truthy(v):
+            return str(v).strip().upper() in ("TRUE", "1", "YES")
         try:
             amount = float(cell(4))
         except (ValueError, TypeError):
@@ -188,7 +192,8 @@ class SheetsHelper:
             "category": cell(3),
             "amount": amount,
             "name": cell(5),
-            "recurring": str(cell(6)).strip().upper() in ("TRUE", "1", "YES"),
+            "recurring": truthy(cell(6)),
+            "budget_excluded": truthy(cell(7)),
         }
 
     def get_month(self, ym: str):
@@ -202,7 +207,8 @@ class SheetsHelper:
         txs.sort(key=lambda t: t["date"], reverse=True)
         return txs
 
-    def add_transaction(self, tx_type, amount, name="", category="", date=None, recurring=False):
+    def add_transaction(self, tx_type, amount, name="", category="", date=None,
+                        recurring=False, budget_excluded=False):
         """Append a transaction to the worksheet for its date's month and return it."""
         date_str = date or datetime.now().strftime("%Y-%m-%d")
         ym = date_str[:7]
@@ -211,11 +217,12 @@ class SheetsHelper:
         ws.append_row([
             entry_id, date_str, tx_type, category, amount, name,
             "TRUE" if recurring else "",
+            "TRUE" if budget_excluded else "",
         ])
         return {
             "id": entry_id, "date": date_str, "type": tx_type,
             "category": category, "amount": float(amount), "name": name,
-            "recurring": bool(recurring),
+            "recurring": bool(recurring), "budget_excluded": bool(budget_excluded),
         }
 
     def delete_by_id(self, ym: str, entry_id: str):
@@ -306,9 +313,13 @@ class SheetsHelper:
     def budget_summary(self, current_ym: str):
         """Everything the webapp's budget UI needs. Scans every month worksheet once.
 
-        - budget / left / spent_this_month: for `current_ym` (left/budget None if unset)
-        - overall_surplus: Σ(budget - spent) over months that had a budget (None if never)
-        - total_savings: Σ(Income + Incoming) - Σ(Expense) across all months
+        - budget / left / spent_this_month: for `current_ym` (left/budget None if unset).
+          `spent_this_month` is the budget-counted spend (excludes expenses flagged
+          BudgetExcluded), so left = budget - spent_this_month.
+        - overall_surplus: Σ(budget - budgeted spend) over months that had a budget
+          (None if never). Budget-excluded expenses don't reduce the surplus.
+        - total_savings: Σ(Income + Incoming) - Σ(Expense) across all months. Counts
+          ALL expenses (excluded ones are still real cash out).
         """
         ledger = self._budget_ledger()
         overall_surplus = 0.0
@@ -318,22 +329,23 @@ class SheetsHelper:
             if not self._MONTH_TITLE_RE.match(ws.title):
                 continue  # skip Budget / any non-month sheet
             ym = datetime.strptime(ws.title, "%b_%Y").strftime("%Y-%m")
-            month_spent = 0.0
+            month_budgeted = 0.0  # expenses that count against the budget this month
             for row in ws.get_all_values()[1:]:  # drop header
                 if not any(c.strip() for c in row):
                     continue
                 tx = self._to_web_tx(row)
                 if tx["type"] == "Expense":
-                    month_spent += tx["amount"]
                     total_expense += tx["amount"]
+                    if not tx["budget_excluded"]:
+                        month_budgeted += tx["amount"]
                 else:  # Income / Incoming
                     total_in += tx["amount"]
             if ym == current_ym:
-                spent_this_month = month_spent
+                spent_this_month = month_budgeted
             budget = self.budget_for_month(ym, ledger)
             if budget is not None:
                 has_budget_any = True
-                overall_surplus += budget - month_spent
+                overall_surplus += budget - month_budgeted
         budget = self.budget_for_month(current_ym, ledger)
         left = (budget - spent_this_month) if budget is not None else None
         return {
@@ -717,6 +729,7 @@ class TxIn(BaseModel):
     category: str = ""
     date: str | None = None
     recurring: bool = False
+    budget_excluded: bool = False
 
 
 # --- FASTAPI APP ---
@@ -781,6 +794,8 @@ def api_add(tx: TxIn, _auth=Depends(require_auth)):
         category=tx.category.strip(),
         date=tx.date,
         recurring=tx.recurring,
+        # Only expenses can be excluded from the budget; ignore the flag otherwise.
+        budget_excluded=tx.budget_excluded and tx.type == "Expense",
     )
     return {"transaction": created}
 

@@ -11,6 +11,27 @@ if (tg) {
   tg.ready();
   tg.expand();
   tg.setHeaderColor && tg.setHeaderColor('secondary_bg_color');
+
+  // True fullscreen needs Bot API 8.0+. Older clients ignore this and just stay
+  // expanded (tg.expand above), so it degrades gracefully.
+  if (tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+    try { tg.requestFullscreen(); } catch (_) {}
+    // Stop a downward swipe from collapsing/closing the app mid-scroll.
+    tg.disableVerticalSwipes && tg.disableVerticalSwipes();
+
+    // In fullscreen the status bar and Telegram's floating close/menu buttons sit
+    // over our content, so push the UI down by the reported safe-area insets and
+    // keep it in sync as they change (rotation, etc.).
+    const applySafeArea = () => {
+      const dev = (tg.safeAreaInset && tg.safeAreaInset.top) || 0;
+      const content = (tg.contentSafeAreaInset && tg.contentSafeAreaInset.top) || 0;
+      document.documentElement.style.setProperty('--safe-top', (dev + content) + 'px');
+    };
+    applySafeArea();
+    tg.onEvent && tg.onEvent('safeAreaChanged', applySafeArea);
+    tg.onEvent && tg.onEvent('contentSafeAreaChanged', applySafeArea);
+    tg.onEvent && tg.onEvent('fullscreenChanged', applySafeArea);
+  }
 }
 
 // --- Categories (mirrors CATEGORIES in main.py) with display colors ---
@@ -199,7 +220,7 @@ function txRow(t) {
       <div class="tx-icon" style="background:${iconBg}22;color:${t.type==='Expense'?catColor(t.category):'var(--pos)'}">${icon}</div>
       <div class="tx-main">
         <div class="tx-name">${escapeHtml(t.name || '(no name)')}${t.recurring ? ' 🔁' : ''}</div>
-        <div class="tx-sub">${pillHtml} · ${dayLabel(t.date)}</div>
+        <div class="tx-sub">${pillHtml} · ${dayLabel(t.date)}${t.budget_excluded ? ' · <span class="off-budget">off-budget</span>' : ''}</div>
       </div>
       <div class="tx-amt ${isIn ? 'pos' : ''}">${sign}${money(t.amount)}</div>
       <button class="tx-del" data-del="${escapeHtml(t.id || '')}" data-month="${(t.date || '').slice(0, 7)}" aria-label="Delete" title="Delete">✕</button>
@@ -267,7 +288,7 @@ function budgetCard(t) {
     <div class="card">
       <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount ${over ? 'neg' : 'pos'}">${over ? '−' : ''}${money(Math.abs(left))}</div>
-      <div class="sub">${over ? 'over budget' : 'left to spend'} · ${money(t.spent)} of ${money(b.budget)} spent</div>
+      <div class="sub">${over ? 'over budget' : 'left to spend'} · ${money(b.spent_this_month)} of ${money(b.budget)} used</div>
       ${surplusHtml}
     </div>`;
 }
@@ -336,6 +357,22 @@ function categoryField() {
   return `<div class="field"><label>Category</label><div class="cat-grid">${chips}</div></div>`;
 }
 
+// Toggle to keep a big-ticket expense out of the monthly budget. Expense/recurring
+// only — the bot's messaging flow has no such option (everything counts there).
+// Defaults OFF (counts toward budget) on every fresh form, so the exclusion is a
+// deliberate per-entry choice that doesn't carry over to the next expense.
+function excludeField() {
+  return `
+    <label class="switch-field">
+      <span class="switch-label">Exclude from monthly budget</span>
+      <span class="switch">
+        <input id="f-exclude" type="checkbox">
+        <span class="slider"></span>
+      </span>
+    </label>
+    <p class="hint-text">For big-ticket items you don't want counted against your budget. Still shows in total spending.</p>`;
+}
+
 function addForm(type) {
   if (type === 'expense') {
     return `
@@ -343,6 +380,7 @@ function addForm(type) {
       ${amountField()}
       ${categoryField()}
       <div class="field"><label>Date</label><input id="f-date" type="date" value="${todayISO()}"></div>
+      ${excludeField()}
       <button id="add-submit" class="btn-primary">Add expense</button>`;
   }
   if (type === 'recurring') {
@@ -351,6 +389,7 @@ function addForm(type) {
       ${amountField()}
       ${categoryField()}
       <div class="field"><label>Repeats on day of month</label><input id="f-day" type="number" min="1" max="28" value="1"></div>
+      ${excludeField()}
       <p class="hint-text">🔁 Logged automatically each month on this day.</p>
       <button id="add-submit" class="btn-primary">Add recurring expense</button>`;
   }
@@ -380,9 +419,12 @@ async function onAddSubmit() {
   const date = (($('#f-date') || {}).value) || todayISO();
   const type = STATE.addType;
 
+  // Only expense/recurring forms show the exclude toggle.
+  const budgetExcluded = !!(($('#f-exclude') || {}).checked);
+
   let tx;
-  if (type === 'expense')   tx = { date, type: 'Expense',  category: STATE.addCategory, amount, name };
-  else if (type === 'recurring') tx = { date: STATE.month + '-' + pad(($('#f-day')||{}).value), type: 'Expense', category: STATE.addCategory, amount, name, recurring: true };
+  if (type === 'expense')   tx = { date, type: 'Expense',  category: STATE.addCategory, amount, name, budget_excluded: budgetExcluded };
+  else if (type === 'recurring') tx = { date: STATE.month + '-' + pad(($('#f-day')||{}).value), type: 'Expense', category: STATE.addCategory, amount, name, recurring: true, budget_excluded: budgetExcluded };
   else if (type === 'income')    tx = { date: STATE.month + '-' + pad(($('#f-day')||{}).value), type: 'Income', category: 'Salary', amount, name, recurring: true };
   else                      tx = { date, type: 'Incoming', category: 'Transfer', amount, name };
 
