@@ -236,14 +236,18 @@ db = SheetsHelper()
 AWAITING_NAME, AWAITING_CATEGORY = range(2)
 
 async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Usage: /spend [amount] — starts the add-expense flow by asking for a name."""
-    # Strict money form only: rejects inf/nan, scientific notation (1e9),
-    # underscores (1_000) and >2 decimals that float() would otherwise accept.
-    if not context.args or not re.fullmatch(r'\d+(\.\d{1,2})?', context.args[0]):
-        await update.message.reply_text("❌ Syntax: /spend [amount]\nExample: /spend 12.50")
+    """Starts the add-expense flow by asking for a name. Triggered when the user
+    sends a bare amount (e.g. "12.50") rather than an explicit command."""
+    # The amount is the whole message (the regex entry filter guarantees it is
+    # numeric, but re-validate the strict money form here in case spend is reached
+    # another way). Rejects inf/nan, scientific notation (1e9), underscores (1_000)
+    # and >2 decimals that float() would otherwise accept.
+    raw = (update.message.text or "").strip()
+    if not re.fullmatch(r'\d+(\.\d{1,2})?', raw):
+        await update.message.reply_text("❌ Send an amount to log an expense.\nExample: 12.50")
         return ConversationHandler.END
 
-    amount = float(context.args[0])
+    amount = float(raw)
     if amount <= 0:
         await update.message.reply_text("⚠️ Amount must be greater than zero.")
         return ConversationHandler.END
@@ -440,9 +444,11 @@ def build_application():
     # owner who passed the /spend entry filter can reach it.
     owner = filters.User(user_id=list(ALLOWED_USER_IDS))
 
-    # Register the multi-step add-expense flow: /spend -> name -> category buttons
+    # Register the multi-step add-expense flow: amount -> name -> category buttons.
+    # A bare numeric message (e.g. "12.50") starts the flow — no command needed.
+    amount_msg = filters.TEXT & ~filters.COMMAND & owner & filters.Regex(r'^\d+(\.\d{1,2})?$')
     add_expense_conv = ConversationHandler(
-        entry_points=[CommandHandler("spend", spend, filters=owner)],
+        entry_points=[MessageHandler(amount_msg, spend)],
         states={
             AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & owner, receive_name)],
             AWAITING_CATEGORY: [CallbackQueryHandler(receive_category, pattern=r"^setcat\|")],
