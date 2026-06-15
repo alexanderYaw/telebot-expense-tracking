@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import math
 import uuid
 import hmac
 import hashlib
@@ -227,6 +228,118 @@ class SheetsHelper:
                 ws.delete_rows(row_num)
                 return deleted
         return None
+
+    # --- Budgeting ------------------------------------------------------
+    # The budget is an effective-dated ledger: each row says "from this month
+    # onward the monthly budget is N". The budget for any month is the most recent
+    # entry on or before it, so changing the budget affects the current month and
+    # every future month while leaving past months untouched. A 0 amount is the
+    # "budget removed from here onward" sentinel.
+    BUDGET_SHEET = "Budget"
+    BUDGET_HEADER = ["EffectiveMonth", "Amount"]
+    _MONTH_TITLE_RE = re.compile(r"^[A-Z][a-z]{2}_\d{4}$")  # e.g. Jun_2026
+
+    def _budget_ws(self, create=False):
+        try:
+            return self.sheet.worksheet(self.BUDGET_SHEET)
+        except gspread.exceptions.WorksheetNotFound:
+            if not create:
+                return None
+            ws = self.sheet.add_worksheet(
+                title=self.BUDGET_SHEET, rows="100", cols=str(len(self.BUDGET_HEADER))
+            )
+            ws.append_row(self.BUDGET_HEADER)
+            return ws
+
+    def _budget_ledger(self):
+        """Sorted [(effective_month 'YYYY-MM', amount float)] entries (0 = removed)."""
+        ws = self._budget_ws()
+        if ws is None:
+            return []
+        ledger = []
+        for row in ws.get_all_values()[1:]:  # drop header
+            if len(row) < 2 or not row[0].strip():
+                continue
+            try:
+                datetime.strptime(row[0].strip(), "%Y-%m")
+                amount = float(row[1])
+            except (ValueError, TypeError):
+                continue
+            ledger.append((row[0].strip(), amount))
+        ledger.sort(key=lambda e: e[0])
+        return ledger
+
+    def budget_for_month(self, ym: str, ledger=None):
+        """Effective budget (float > 0) for 'YYYY-MM', or None if none applies."""
+        if ledger is None:
+            ledger = self._budget_ledger()
+        effective = None
+        for month, amount in ledger:  # ascending
+            if month <= ym:
+                effective = amount
+            else:
+                break
+        return effective if (effective and effective > 0) else None
+
+    def _upsert_budget(self, ym: str, amount: float):
+        """Set the budget effective from month `ym`, replacing that month's row."""
+        ws = self._budget_ws(create=True)
+        for row_num, cell in enumerate(ws.col_values(1)[1:], start=2):
+            if cell.strip() == ym:
+                ws.update_cell(row_num, 2, amount)
+                return
+        ws.append_row([ym, amount])
+
+    def set_budget(self, amount: float):
+        """Set/change the budget from the current month onward. amount must be > 0
+        (validated by the caller)."""
+        self._upsert_budget(datetime.now().strftime("%Y-%m"), float(amount))
+        return float(amount)
+
+    def remove_budget(self):
+        """Remove the budget from the current month onward (past months keep theirs)."""
+        self._upsert_budget(datetime.now().strftime("%Y-%m"), 0)
+
+    def budget_summary(self, current_ym: str):
+        """Everything the webapp's budget UI needs. Scans every month worksheet once.
+
+        - budget / left / spent_this_month: for `current_ym` (left/budget None if unset)
+        - overall_surplus: Σ(budget - spent) over months that had a budget (None if never)
+        - total_savings: Σ(Income + Incoming) - Σ(Expense) across all months
+        """
+        ledger = self._budget_ledger()
+        overall_surplus = 0.0
+        has_budget_any = False
+        total_in = total_expense = spent_this_month = 0.0
+        for ws in self.sheet.worksheets():
+            if not self._MONTH_TITLE_RE.match(ws.title):
+                continue  # skip Budget / any non-month sheet
+            ym = datetime.strptime(ws.title, "%b_%Y").strftime("%Y-%m")
+            month_spent = 0.0
+            for row in ws.get_all_values()[1:]:  # drop header
+                if not any(c.strip() for c in row):
+                    continue
+                tx = self._to_web_tx(row)
+                if tx["type"] == "Expense":
+                    month_spent += tx["amount"]
+                    total_expense += tx["amount"]
+                else:  # Income / Incoming
+                    total_in += tx["amount"]
+            if ym == current_ym:
+                spent_this_month = month_spent
+            budget = self.budget_for_month(ym, ledger)
+            if budget is not None:
+                has_budget_any = True
+                overall_surplus += budget - month_spent
+        budget = self.budget_for_month(current_ym, ledger)
+        left = (budget - spent_this_month) if budget is not None else None
+        return {
+            "budget": round(budget, 2) if budget is not None else None,
+            "spent_this_month": round(spent_this_month, 2),
+            "left": round(left, 2) if left is not None else None,
+            "overall_surplus": round(overall_surplus, 2) if has_budget_any else None,
+            "total_savings": round(total_in - total_expense, 2),
+        }
 
 db = SheetsHelper()
 
@@ -622,6 +735,37 @@ def api_delete(entry_id: str, month: str, _auth=Depends(require_auth)):
     if not deleted:
         raise HTTPException(status_code=404, detail="No entry with that id this month")
     return {"deleted": deleted}
+
+
+class BudgetIn(BaseModel):
+    amount: float
+
+
+def _require_positive_budget(amount: float) -> float:
+    # Budget cannot be zero or negative (and reject NaN/inf, which slip past `<=`).
+    if amount is None or not math.isfinite(amount) or amount <= 0:
+        raise HTTPException(status_code=400, detail="budget must be greater than zero")
+    return round(amount, 2)
+
+
+@app.get("/api/budget")
+def api_budget_get(month: str, _auth=Depends(require_auth)):
+    _require_month(month)
+    return db.budget_summary(month)
+
+
+@app.post("/api/budget")
+def api_budget_set(b: BudgetIn, month: str, _auth=Depends(require_auth)):
+    _require_month(month)
+    db.set_budget(_require_positive_budget(b.amount))
+    return db.budget_summary(month)
+
+
+@app.delete("/api/budget")
+def api_budget_remove(month: str, _auth=Depends(require_auth)):
+    _require_month(month)
+    db.remove_budget()
+    return db.budget_summary(month)
 
 
 # Serve the Mini App's static files. Mounted last so it doesn't shadow the

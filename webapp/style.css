@@ -257,6 +257,27 @@ html, body {
 }
 .btn-primary:active { opacity: .85; }
 
+.btn-secondary {
+  width: 100%;
+  border: 1.5px solid var(--line);
+  background: transparent;
+  color: var(--neg);
+  font: inherit; font-weight: 700; font-size: 15px;
+  padding: 13px;
+  border-radius: 14px;
+  cursor: pointer;
+  margin-top: 10px;
+}
+.btn-secondary:active { opacity: .85; }
+
+/* ---------- Budget ---------- */
+.budget-amount { font-size: 30px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
+.budget-amount.pos { color: var(--pos); }
+.budget-amount.neg { color: var(--neg); }
+.budget-surplus { font-size: 13px; color: var(--hint); font-weight: 600; }
+.budget-surplus .pos { color: var(--pos); }
+.budget-surplus .neg { color: var(--neg); }
+
 /* ---------- Empty state ---------- */
 .empty { text-align: center; color: var(--hint); padding: 48px 20px; }
 .empty .big { font-size: 34px; margin-bottom: 8px; }

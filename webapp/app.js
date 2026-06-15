@@ -37,6 +37,8 @@ const STATE = {
   addCategory: 'Food',
   categoryFilter: 'All',
   cache: {},                      // { 'YYYY-MM': [tx, ...] }  (undefined = not loaded)
+  budget: null,                   // last-fetched budget summary (see API.budgetGet)
+  budgetMonth: null,              // the month STATE.budget was computed for
   loading: false,
   error: null,
 };
@@ -71,6 +73,27 @@ const API = {
     });
     if (!r.ok) throw new Error(`Delete failed (${r.status})`);
   },
+  // Budget summary for `month`: { budget, left, spent_this_month, overall_surplus,
+  // total_savings }. budget/left are null when no budget applies to that month.
+  async budgetGet(month) {
+    const r = await fetch(`/api/budget?month=${month}`, { headers: this.headers() });
+    if (!r.ok) throw new Error(`Budget load failed (${r.status})`);
+    return await r.json();
+  },
+  async budgetSet(month, amount) {
+    const r = await fetch(`/api/budget?month=${month}`, {
+      method: 'POST', headers: this.headers(), body: JSON.stringify({ amount }),
+    });
+    if (!r.ok) throw new Error(`Budget save failed (${r.status})`);
+    return await r.json();
+  },
+  async budgetRemove(month) {
+    const r = await fetch(`/api/budget?month=${month}`, {
+      method: 'DELETE', headers: this.headers(),
+    });
+    if (!r.ok) throw new Error(`Budget remove failed (${r.status})`);
+    return await r.json();
+  },
 };
 
 // Load a month into the cache if not already present. Sets loading/error flags.
@@ -90,9 +113,28 @@ async function ensureMonth(ym, { force = false } = {}) {
 
 function invalidate(ym) { delete STATE.cache[ym]; }
 
+// Budget totals span every month, so any add/delete can change the surplus and
+// savings — force the next ensureBudget to refetch.
+function invalidateBudget() { STATE.budgetMonth = null; }
+
+// Load the budget summary for `ym` if we don't already have it for that month.
+async function ensureBudget(ym, { force = false } = {}) {
+  if (!force && STATE.budgetMonth === ym && STATE.budget) return;
+  try {
+    STATE.budget = await API.budgetGet(ym);
+    STATE.budgetMonth = ym;
+  } catch (e) {
+    STATE.error = e.message || 'Could not load budget';
+  }
+}
+
 // Re-fetch the active month and re-render the current tab.
 async function refreshActive() {
   await ensureMonth(STATE.month, { force: true });
+  invalidateBudget();
+  if (STATE.activeTab === 'home' || STATE.activeTab === 'budget') {
+    await ensureBudget(STATE.month);
+  }
   RENDERERS[STATE.activeTab]();
 }
 
@@ -182,6 +224,8 @@ function renderHome() {
       <div class="sub">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
     </div>
 
+    ${budgetCard(t)}
+
     <div class="stat-row">
       <div class="card stat">
         <div class="label">Income</div>
@@ -196,6 +240,35 @@ function renderHome() {
     <div class="card">
       <p class="card-title">Recent activity</p>
       ${recent.length ? recent.map(txRow).join('') : emptyInline('Nothing logged yet')}
+    </div>`;
+}
+
+// Budget summary shown on Home: amount left to spend (green) / overspend (red),
+// this-month expenditure, and the overall budget surplus across all months.
+function budgetCard(t) {
+  const b = STATE.budget;
+  // No budget configured for this month → invite the user to set one.
+  if (!b || b.budget == null) {
+    return `
+      <div class="card">
+        <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
+        <div class="sub">No budget set for this month.</div>
+        <button class="btn-primary" data-goto="budget">Set a budget</button>
+      </div>`;
+  }
+  const left = b.left;                       // budget − spent (negative = overspent)
+  const over = left < 0;
+  const surplus = b.overall_surplus;         // cumulative across months (may be null)
+  const surplusHtml = surplus == null ? '' : `
+      <div class="budget-surplus">Overall budget surplus:
+        <span class="${surplus < 0 ? 'neg' : 'pos'}">${surplus < 0 ? '−' : '+'}${money(Math.abs(surplus))}</span>
+      </div>`;
+  return `
+    <div class="card">
+      <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
+      <div class="budget-amount ${over ? 'neg' : 'pos'}">${over ? '−' : ''}${money(Math.abs(left))}</div>
+      <div class="sub">${over ? 'over budget' : 'left to spend'} · ${money(t.spent)} of ${money(b.budget)} spent</div>
+      ${surplusHtml}
     </div>`;
 }
 
@@ -309,6 +382,7 @@ async function onAddSubmit() {
     // Drop it straight into the right month's cache so Home/History reflect it.
     const ym = (created.date || tx.date).slice(0, 7);
     if (STATE.cache[ym]) STATE.cache[ym].push(created); else invalidate(ym);
+    invalidateBudget();           // surplus/savings/left changed
     haptic('success');
     toast('✅ Added ' + money(amount));
     STATE.month = ym;
@@ -409,10 +483,88 @@ function renderCategories() {
 }
 
 // ============================================================
+//  VIEW: BUDGET  (total savings + set / edit / remove budget)
+// ============================================================
+function renderBudget() {
+  const b = STATE.budget;
+  const savings = b ? b.total_savings : null;
+  const hasBudget = b && b.budget != null;
+  const surplus = b ? b.overall_surplus : null;
+
+  $('#view-budget').innerHTML = `
+    ${statusBanner()}
+    <div class="card hero">
+      <p class="card-title">Total savings</p>
+      <div class="amount">${savings == null ? '—' : (savings < 0 ? '−' : '') + money(Math.abs(savings))}</div>
+      <div class="sub">All income minus all expenses, across every month</div>
+    </div>
+
+    <div class="card">
+      <p class="card-title">Monthly budget</p>
+      <div class="field">
+        <label>Budget amount</label>
+        <div class="amount-input"><span>$</span><input id="b-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${hasBudget ? b.budget : ''}"></div>
+      </div>
+      <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
+      <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
+      ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
+      ${hasBudget && surplus != null ? `
+        <div class="budget-surplus" style="margin-top:14px">Overall budget surplus:
+          <span class="${surplus < 0 ? 'neg' : 'pos'}">${surplus < 0 ? '−' : '+'}${money(Math.abs(surplus))}</span>
+        </div>` : ''}
+    </div>`;
+
+  const save = $('#b-save');
+  if (save) save.addEventListener('click', onBudgetSave);
+  const remove = $('#b-remove');
+  if (remove) remove.addEventListener('click', onBudgetRemove);
+}
+
+async function onBudgetSave() {
+  const amount = parseFloat(($('#b-amount') || {}).value);
+  if (!amount || amount <= 0) { toast('⚠️ Budget must be greater than 0'); return; }
+  const btn = $('#b-save');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const month = thisMonthISO();
+    STATE.budget = await API.budgetSet(month, amount);
+    STATE.budgetMonth = month;
+    haptic('success');
+    toast('✅ Budget saved');
+    renderBudget();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Could not save'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Set budget'; }
+  }
+}
+
+async function onBudgetRemove() {
+  const ok = (tg && tg.showConfirm)
+    ? await new Promise((res) => tg.showConfirm('Remove your monthly budget?', res))
+    : window.confirm('Remove your monthly budget?');
+  if (!ok) return;
+  const btn = $('#b-remove');
+  if (btn) { btn.disabled = true; btn.textContent = 'Removing…'; }
+  try {
+    const month = thisMonthISO();
+    STATE.budget = await API.budgetRemove(month);
+    STATE.budgetMonth = month;
+    haptic('success');
+    toast('🗑️ Budget removed');
+    renderBudget();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Could not remove'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Remove budget'; }
+  }
+}
+
+// ============================================================
 //  Tab navigation
 // ============================================================
-const TITLES = { home: 'Home', add: 'Add', history: 'History', categories: 'Categories' };
-const RENDERERS = { home: renderHome, add: renderAdd, history: renderHistory, categories: renderCategories };
+const TITLES = { home: 'Home', add: 'Add', history: 'History', categories: 'Categories', budget: 'Budget' };
+const RENDERERS = { home: renderHome, add: renderAdd, history: renderHistory, categories: renderCategories, budget: renderBudget };
 
 async function switchTab(tab) {
   STATE.activeTab = tab;
@@ -425,6 +577,10 @@ async function switchTab(tab) {
   // The data-backed tabs need the active month loaded; fetch then repaint.
   if (tab !== 'add') {
     await ensureMonth(STATE.month);
+    // Home reflects the month being viewed; the Budget tab always edits the
+    // current calendar month (budget changes apply from now on).
+    if (tab === 'home') await ensureBudget(STATE.month);
+    else if (tab === 'budget') await ensureBudget(thisMonthISO());
     if (STATE.activeTab === tab) RENDERERS[tab]();
   }
 }
@@ -437,6 +593,12 @@ document.querySelectorAll('.tab').forEach((b) =>
 
 // Tapping the month pill takes you to History, where the month stepper lives.
 $('#month-pill').addEventListener('click', () => switchTab('history'));
+
+// Buttons that just navigate to another tab (e.g. Home's "Set a budget").
+$('#app').addEventListener('click', (e) => {
+  const goto = e.target.closest('[data-goto]');
+  if (goto) switchTab(goto.dataset.goto);
+});
 
 // Delete: one delegated handler covers tx rows in any view.
 $('#app').addEventListener('click', async (e) => {
