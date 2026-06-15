@@ -1,9 +1,9 @@
 import os
+import io
 import re
 import json
 import math
 import time
-import uuid
 import hmac
 import hashlib
 import asyncio
@@ -12,9 +12,8 @@ from http import HTTPStatus
 from contextlib import asynccontextmanager
 from datetime import datetime
 from urllib.parse import parse_qsl
-import gspread
-from google.oauth2.service_account import Credentials
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from openpyxl import Workbook
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 from telegram.error import TelegramError, RetryAfter
 from telegram.helpers import escape_markdown
 from telegram.ext import (
@@ -27,13 +26,13 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from db import Store, init_schema
+
 # Load environment variables from the .env file
 load_dotenv()
 
 # --- CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-SPREADSHEET_URL_OR_ID = os.getenv("SPREADSHEET_ID")
-GOOGLE_CREDENTIALS_FILE = "service_account.json"
 
 # Webhook (hosted) configuration. On Render, the platform automatically injects
 # RENDER_EXTERNAL_URL (the public https URL of the web service) and PORT, so the
@@ -44,16 +43,20 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL") or os.getenv("RENDER_EXTERNAL_URL")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "8080"))
 
-# Owner allowlist. Both the bot commands and the Mini App API are restricted to
-ALLOWED_USER_IDS = {
+# Admin IDs. The bot is open self-serve (anyone may use it; data is isolated per
+# user in Postgres), so this is NO LONGER an access gate — it's the set of admins
+# allowed to run /ban, /unban and /stats. Read from the ALLOWED_USER_IDS env var.
+ADMIN_USER_IDS = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x
 }
 
+# Local preview only: in DEV_MODE the Mini App has no signed initData, so requests
+# carry no real user. Fall back to this id (defaults to the first admin) so the
+# webapp still works against a dev database when opened in a plain browser.
+DEV_USER_ID = int(os.getenv("DEV_USER_ID", str(next(iter(ADMIN_USER_IDS), 0))))
+
 if not TELEGRAM_TOKEN:
     raise ValueError("No TELEGRAM_TOKEN found in .env file.")
-
-if not SPREADSHEET_URL_OR_ID:
-    raise ValueError("No SPREADSHEET_ID found in .env file.")
 
 # Define your custom categories here
 CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
@@ -61,340 +64,8 @@ CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing",
 # Enable logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# --- GOOGLE SHEETS HELPER ---
-class SheetsHelper:
-    def __init__(self):
-        scopes = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-        creds = self._load_credentials(scopes)
-        self.client = gspread.authorize(creds)
-        self.sheet = self.client.open_by_key(SPREADSHEET_URL_OR_ID)
-
-    @staticmethod
-    def _load_credentials(scopes):
-        """Load service-account credentials. Prefers GOOGLE_CREDENTIALS_JSON (the raw
-        JSON pasted into a Render env var) so no key file needs to live in the repo or
-        image; falls back to the local service_account.json file for development."""
-        creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-        if creds_json:
-            info = json.loads(creds_json)
-            return Credentials.from_service_account_info(info, scopes=scopes)
-        return Credentials.from_service_account_file(GOOGLE_CREDENTIALS_FILE, scopes=scopes)
-
-    HEADER = ["ID", "Date", "Type", "Category", "Amount", "Notes", "Recurring", "BudgetExcluded"]
-
-    @staticmethod
-    def _title_for_month(ym: str) -> str:
-        """'2026-06' -> 'Jun_2026', matching the bot's monthly worksheet naming."""
-        return datetime.strptime(ym, "%Y-%m").strftime("%b_%Y")
-
-    def _get_or_create_worksheet(self, title: str):
-        try:
-            return self.sheet.worksheet(title)
-        except gspread.exceptions.WorksheetNotFound:
-            ws = self.sheet.add_worksheet(title=title, rows="100", cols=str(len(self.HEADER)))
-            ws.append_row(self.HEADER)
-            return ws
-
-    def _get_current_month_worksheet(self):
-        return self._get_or_create_worksheet(datetime.now().strftime("%b_%Y"))
-
-    def add_expense(self, category: str, amount: float, name: str = ""):
-        ws = self._get_current_month_worksheet()
-        entry_id = str(uuid.uuid4())[:8]
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        # Expenses added via the bot always count toward the budget (no exclude option).
-        ws.append_row([entry_id, date_str, "Expense", category, amount, name, "", ""])
-        return entry_id
-
-    def list_expenses(self):
-        ws = self._get_current_month_worksheet()
-        records = ws.get_all_records()
-        return records
-
-    def _row_to_expense(self, row_values):
-        """Maps a raw worksheet row to an expense dict (Name lives in the Notes column)."""
-        return {
-            "category": row_values[3] if len(row_values) > 3 else "",
-            "amount": row_values[4] if len(row_values) > 4 else "",
-            "name": row_values[5] if len(row_values) > 5 else "",
-        }
-
-    def delete_last_entry(self):
-        ws = self._get_current_month_worksheet()
-        total_rows = len(ws.col_values(1))
-        if total_rows > 1:
-            expense = self._row_to_expense(ws.row_values(total_rows))
-            ws.delete_rows(total_rows)
-            return expense
-        return None
-
-    def get_expense_by_index(self, month: str, index: int):
-        try:
-            ws = self.sheet.worksheet(month)
-        except gspread.exceptions.WorksheetNotFound:
-            return None
-        records = ws.get_all_records()
-        if 1 <= index <= len(records):
-            return records[index - 1]
-        return None
-
-    def delete_by_index(self, index: int):
-        ws = self._get_current_month_worksheet()
-        if index < 1:
-            return None
-        target_row = index + 1
-        row_values = ws.row_values(target_row)
-        if not row_values:
-            return None
-        expense = self._row_to_expense(row_values)
-        ws.delete_rows(target_row)
-        return expense
-
-    def edit_by_index(self, index: int, category: str = None, amount: float = None, name: str = None):
-        ws = self._get_current_month_worksheet()
-        if index < 1:
-            return None
-        target_row = index + 1
-        if not ws.row_values(target_row):
-            return None
-
-        if category is not None:
-            ws.update_cell(target_row, 4, category)
-        if amount is not None:
-            ws.update_cell(target_row, 5, amount)
-        if name is not None:
-            ws.update_cell(target_row, 6, name)
-
-        # Read the row back so the caller gets the full, up-to-date expense
-        return self._row_to_expense(ws.row_values(target_row))
-
-    # --- Web API surface ------------------------------------------------
-    # These read/write by month ('YYYY-MM') and ID rather than by row index,
-    # so the Mini App can address any month and any row unambiguously.
-
-    @staticmethod
-    def _to_web_tx(row):
-        """Maps a positional worksheet row to the shape the webapp expects. Columns:
-        0=ID 1=Date 2=Type 3=Category 4=Amount 5=Notes 6=Recurring 7=BudgetExcluded."""
-        def cell(i):
-            return row[i] if len(row) > i else ""
-
-        def truthy(v):
-            return str(v).strip().upper() in ("TRUE", "1", "YES")
-        try:
-            amount = float(cell(4))
-        except (ValueError, TypeError):
-            amount = 0.0
-        return {
-            "id": cell(0),
-            "date": cell(1),
-            "type": cell(2) or "Expense",
-            "category": cell(3),
-            "amount": amount,
-            "name": cell(5),
-            "recurring": truthy(cell(6)),
-            "budget_excluded": truthy(cell(7)),
-        }
-
-    def get_month(self, ym: str):
-        """All transactions for a 'YYYY-MM' month, newest first. [] if no sheet yet."""
-        try:
-            ws = self.sheet.worksheet(self._title_for_month(ym))
-        except gspread.exceptions.WorksheetNotFound:
-            return []
-        rows = ws.get_all_values()[1:]  # drop header
-        txs = [self._to_web_tx(r) for r in rows if any(c.strip() for c in r)]
-        txs.sort(key=lambda t: t["date"], reverse=True)
-        return txs
-
-    def add_transaction(self, tx_type, amount, name="", category="", date=None,
-                        recurring=False, budget_excluded=False):
-        """Append a transaction to the worksheet for its date's month and return it."""
-        date_str = date or datetime.now().strftime("%Y-%m-%d")
-        ym = date_str[:7]
-        ws = self._get_or_create_worksheet(self._title_for_month(ym))
-        entry_id = str(uuid.uuid4())[:8]
-        ws.append_row([
-            entry_id, date_str, tx_type, category, amount, name,
-            "TRUE" if recurring else "",
-            "TRUE" if budget_excluded else "",
-        ])
-        return {
-            "id": entry_id, "date": date_str, "type": tx_type,
-            "category": category, "amount": float(amount), "name": name,
-            "recurring": bool(recurring), "budget_excluded": bool(budget_excluded),
-        }
-
-    def delete_by_id(self, ym: str, entry_id: str):
-        """Delete the row whose ID matches in the given month. Returns it, or None."""
-        try:
-            ws = self.sheet.worksheet(self._title_for_month(ym))
-        except gspread.exceptions.WorksheetNotFound:
-            return None
-        ids = ws.col_values(1)
-        for row_num, cell in enumerate(ids[1:], start=2):  # skip header row
-            if cell == entry_id:
-                deleted = self._to_web_tx(ws.row_values(row_num))
-                ws.delete_rows(row_num)
-                return deleted
-        return None
-
-    # --- Budgeting ------------------------------------------------------
-    # The budget is an effective-dated ledger: each row says "from this month
-    # onward the monthly budget is N". The budget for any month is the most recent
-    # entry on or before it, so changing the budget affects the current month and
-    # every future month while leaving past months untouched. A 0 amount is the
-    # "budget removed from here onward" sentinel.
-    BUDGET_SHEET = "Budget"
-    BUDGET_HEADER = ["EffectiveMonth", "Amount"]
-    _MONTH_TITLE_RE = re.compile(r"^[A-Z][a-z]{2}_\d{4}$")  # e.g. Jun_2026
-
-    def _budget_ws(self, create=False):
-        try:
-            return self.sheet.worksheet(self.BUDGET_SHEET)
-        except gspread.exceptions.WorksheetNotFound:
-            if not create:
-                return None
-            ws = self.sheet.add_worksheet(
-                title=self.BUDGET_SHEET, rows="100", cols=str(len(self.BUDGET_HEADER))
-            )
-            ws.append_row(self.BUDGET_HEADER)
-            return ws
-
-    def _budget_ledger(self):
-        """Sorted [(effective_month 'YYYY-MM', amount float)] entries (0 = removed)."""
-        ws = self._budget_ws()
-        if ws is None:
-            return []
-        ledger = []
-        for row in ws.get_all_values()[1:]:  # drop header
-            if len(row) < 2 or not row[0].strip():
-                continue
-            try:
-                datetime.strptime(row[0].strip(), "%Y-%m")
-                amount = float(row[1])
-            except (ValueError, TypeError):
-                continue
-            ledger.append((row[0].strip(), amount))
-        ledger.sort(key=lambda e: e[0])
-        return ledger
-
-    def budget_for_month(self, ym: str, ledger=None):
-        """Effective budget (float > 0) for 'YYYY-MM', or None if none applies."""
-        if ledger is None:
-            ledger = self._budget_ledger()
-        effective = None
-        for month, amount in ledger:  # ascending
-            if month <= ym:
-                effective = amount
-            else:
-                break
-        return effective if (effective and effective > 0) else None
-
-    def _upsert_budget(self, ym: str, amount: float):
-        """Set the budget effective from month `ym`, replacing that month's row."""
-        ws = self._budget_ws(create=True)
-        for row_num, cell in enumerate(ws.col_values(1)[1:], start=2):
-            if cell.strip() == ym:
-                ws.update_cell(row_num, 2, amount)
-                return
-        ws.append_row([ym, amount])
-
-    def set_budget(self, amount: float):
-        """Set/change the budget from the current month onward. amount must be > 0
-        (validated by the caller)."""
-        self._upsert_budget(datetime.now().strftime("%Y-%m"), float(amount))
-        return float(amount)
-
-    def remove_budget(self):
-        """Remove the budget from the current month onward (past months keep theirs)."""
-        self._upsert_budget(datetime.now().strftime("%Y-%m"), 0)
-
-    def budget_summary(self, current_ym: str):
-        """Everything the webapp's budget UI needs. Scans every month worksheet once.
-
-        - budget / left / spent_this_month: for `current_ym` (left/budget None if unset).
-          `spent_this_month` is the budget-counted spend (excludes expenses flagged
-          BudgetExcluded), so left = budget - spent_this_month.
-        - overall_surplus: Σ(budget - budgeted spend) over months that had a budget
-          (None if never). Budget-excluded expenses don't reduce the surplus.
-        - total_savings: Σ(Income + Incoming) - Σ(Expense) across all months. Counts
-          ALL expenses (excluded ones are still real cash out).
-        """
-        ledger = self._budget_ledger()
-        overall_surplus = 0.0
-        has_budget_any = False
-        total_in = total_expense = spent_this_month = 0.0
-        for ws in self.sheet.worksheets():
-            if not self._MONTH_TITLE_RE.match(ws.title):
-                continue  # skip Budget / any non-month sheet
-            ym = datetime.strptime(ws.title, "%b_%Y").strftime("%Y-%m")
-            month_budgeted = 0.0  # expenses that count against the budget this month
-            for row in ws.get_all_values()[1:]:  # drop header
-                if not any(c.strip() for c in row):
-                    continue
-                tx = self._to_web_tx(row)
-                if tx["type"] == "Expense":
-                    total_expense += tx["amount"]
-                    if not tx["budget_excluded"]:
-                        month_budgeted += tx["amount"]
-                else:  # Income / Incoming
-                    total_in += tx["amount"]
-            if ym == current_ym:
-                spent_this_month = month_budgeted
-            budget = self.budget_for_month(ym, ledger)
-            if budget is not None:
-                has_budget_any = True
-                overall_surplus += budget - month_budgeted
-        budget = self.budget_for_month(current_ym, ledger)
-        left = (budget - spent_this_month) if budget is not None else None
-        return {
-            "budget": round(budget, 2) if budget is not None else None,
-            "spent_this_month": round(spent_this_month, 2),
-            "left": round(left, 2) if left is not None else None,
-            "overall_surplus": round(overall_surplus, 2) if has_budget_any else None,
-            "total_savings": round(total_in - total_expense, 2),
-        }
-
-    # --- Daily message clear bookmark -----------------------------------
-    # Persists, per chat, the highest message_id already deleted so the nightly
-    # sweep only has to walk that day's new messages (and survives restarts).
-    CLEAR_STATE_SHEET = "ClearState"
-    CLEAR_STATE_HEADER = ["ChatID", "ClearedUpTo"]
-
-    def _clear_state_ws(self, create=False):
-        try:
-            return self.sheet.worksheet(self.CLEAR_STATE_SHEET)
-        except gspread.exceptions.WorksheetNotFound:
-            if not create:
-                return None
-            ws = self.sheet.add_worksheet(
-                title=self.CLEAR_STATE_SHEET, rows="100", cols=str(len(self.CLEAR_STATE_HEADER))
-            )
-            ws.append_row(self.CLEAR_STATE_HEADER)
-            return ws
-
-    def get_cleared_up_to(self, chat_id):
-        ws = self._clear_state_ws()
-        if ws is None:
-            return None
-        for row in ws.get_all_values()[1:]:
-            if len(row) >= 2 and row[0].strip() == str(chat_id):
-                try:
-                    return int(row[1])
-                except (ValueError, TypeError):
-                    return None
-        return None
-
-    def set_cleared_up_to(self, chat_id, message_id):
-        ws = self._clear_state_ws(create=True)
-        for row_num, cell in enumerate(ws.col_values(1)[1:], start=2):
-            if cell.strip() == str(chat_id):
-                ws.update_cell(row_num, 2, message_id)
-                return
-        ws.append_row([str(chat_id), message_id])
-
-db = SheetsHelper()
+# Postgres-backed per-user store (system of record).
+store = Store()
 
 # --- TELEGRAM HANDLERS ---
 
@@ -414,9 +85,26 @@ def _flow_start(update):
 def _flow_end(update):
     ACTIVE_FLOWS.pop(update.effective_chat.id, None)
 
+
+def _gate(update) -> int | None:
+    """Provision the user on first contact (open self-serve) and return their id,
+    or None if they're banned. Use at the top of every user-facing handler."""
+    u = update.effective_user
+    if u is None:
+        return None
+    username = u.username or u.full_name
+    return None if store.ensure_user(u.id, username) else u.id
+
+
+def _is_admin(update) -> bool:
+    return bool(update.effective_user and update.effective_user.id in ADMIN_USER_IDS)
+
+
 async def spend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Starts the add-expense flow by asking for a name. Triggered when the user
     sends a bare amount (e.g. "12.50") rather than an explicit command."""
+    if _gate(update) is None:
+        return ConversationHandler.END
     # The amount is the whole message (the regex entry filter guarantees it is
     # numeric, but re-validate the strict money form here in case spend is reached
     # another way). Rejects inf/nan, scientific notation (1e9), underscores (1_000)
@@ -468,7 +156,7 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return AWAITING_CATEGORY
 
 async def receive_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Captures the category button press and writes the expense to the sheet."""
+    """Captures the category button press and writes the expense to the store."""
     query = update.callback_query
 
     # Telegram requires you to answer the query to stop the loading animation on the button
@@ -478,8 +166,9 @@ async def receive_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = context.user_data.get('name', '')
     amount = context.user_data.get('amount', 0.0)
 
-    # Save to Google Sheets
-    db.add_expense(category, amount, name)
+    # Save to Postgres for this user. Expenses added via the bot always count
+    # toward the budget (no exclude option — that's webapp-only).
+    store.add_transaction(update.effective_user.id, "Expense", amount, name=name, category=category)
 
     # Replace the button grid with a success message
     await query.edit_message_text(f"✅ Logged: {name} — ${amount:.2f} for {category}")
@@ -503,7 +192,7 @@ def format_date(date_str):
         return date_str
 
 def format_expense(expense):
-    """Renders an expense dict as 'Name | Category | $Price'."""
+    """Renders a transaction dict as 'Name | Category | $Price'."""
     name = expense.get('name') or '(no name)'
     category = expense.get('category', '')
     try:
@@ -513,7 +202,10 @@ def format_expense(expense):
     return f"{name} | {category} | {amount}"
 
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    expense = db.delete_last_entry()
+    uid = _gate(update)
+    if uid is None:
+        return
+    expense = store.delete_last(uid)
     if expense:
         await update.message.reply_text(
             f"↩️ Undo successful. Deleted: {format_expense(expense)}"
@@ -538,40 +230,47 @@ async def _reply_chunked(message, text, **kwargs):
         await message.reply_text(buf.rstrip("\n"), **kwargs)
 
 async def list_month(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    records = db.list_expenses()
-    if not records:
+    uid = _gate(update)
+    if uid is None:
+        return
+    expenses = store.month_expenses(uid, datetime.now().strftime("%Y-%m"))
+    if not expenses:
         await update.message.reply_text("No expenses logged this month.")
         return
 
     lines = [f"**{datetime.now().strftime('%B %Y')} Expenses**"]
     total = 0.0
-
-    for i, row in enumerate(records, start=1):
-        if row.get('Type') != 'Expense':
-            continue
-        # A single malformed cell must not crash the whole listing.
-        try:
-            total += float(row['Amount'])
-        except (ValueError, TypeError, KeyError):
-            pass
+    for i, tx in enumerate(expenses, start=1):
+        total += tx["amount"]
         # Escape user-controlled fields so stray markdown chars (e.g. "Mc_Donald")
         # can't break Telegram's Markdown parser and abort the message.
-        name = escape_markdown(str(row.get('Notes') or ' '), version=1)
-        date = escape_markdown(str(format_date(row.get('Date'))), version=1)
-        amount = escape_markdown(str(row.get('Amount', '')), version=1)
+        name = escape_markdown(str(tx.get("name") or " "), version=1)
+        date = escape_markdown(str(format_date(tx.get("date"))), version=1)
+        amount = escape_markdown(f"{tx['amount']:.2f}", version=1)
         lines.append(f"`[{i}]` ({date}) {name}: ${amount}")
 
     lines.append(f"\n*Total: ${total:.2f}*")
     await _reply_chunked(update.message, "\n".join(lines), parse_mode='Markdown')
 
+def _expense_id_by_index(uid: int, index: int):
+    """Map a 1-based /list index to the underlying transaction id for this month."""
+    expenses = store.month_expenses(uid, datetime.now().strftime("%Y-%m"))
+    if 1 <= index <= len(expenses):
+        return expenses[index - 1]["id"]
+    return None
+
 async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = _gate(update)
+    if uid is None:
+        return
     try:
         index = int(context.args[0])
     except (IndexError, ValueError):
         await update.message.reply_text("❌ Syntax: /rm [index]\nExample: /rm 3")
         return
 
-    expense = db.delete_by_index(index)
+    entry_id = _expense_id_by_index(uid, index)
+    expense = store.delete_by_id(uid, entry_id) if entry_id else None
     if expense:
         await update.message.reply_text(
             f"🗑️ Deleted [{index}]: {format_expense(expense)}"
@@ -580,8 +279,11 @@ async def remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ No entry found at index [{index}].")
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = _gate(update)
+    if uid is None:
+        return
     text = update.message.text
-    
+
     id_match = re.search(r'^/edit\s+(\d+)', text, re.IGNORECASE)
     if not id_match:
         await update.message.reply_text("❌ Syntax: /edit [index] c/[category] p/[price] n/[new_name]")
@@ -603,7 +305,8 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Provide at least one flag: c/[category], p/[price] or n/[new_name]")
         return
 
-    expense = db.edit_by_index(entry_idx, category, price, name)
+    entry_id = _expense_id_by_index(uid, entry_idx)
+    expense = store.edit_transaction(uid, entry_id, category, price, name) if entry_id else None
     if not expense:
         await update.message.reply_text(f"⚠️ No entry found at index [{entry_idx}].")
         return
@@ -611,6 +314,76 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ Updated [{entry_idx}]: {format_expense(expense)}"
     )
+
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Build the user's transactions into an .xlsx and send it into the chat."""
+    uid = _gate(update)
+    if uid is None:
+        return
+    txs = store.all_transactions(uid)
+    if not txs:
+        await update.message.reply_text("No transactions to export yet.")
+        return
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Transactions"
+    ws.append(["ID", "Date", "Type", "Category", "Amount", "Name", "Recurring", "BudgetExcluded"])
+    for t in txs:
+        ws.append([
+            t["id"], t["date"], t["type"], t["category"], t["amount"],
+            t["name"], t["recurring"], t["budget_excluded"],
+        ])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"expenses_{datetime.now():%Y%m%d}.xlsx"
+    await update.message.reply_document(
+        document=InputFile(buf, filename=filename), caption="📊 Your expense export"
+    )
+
+# --- ADMIN COMMANDS (restricted to ADMIN_USER_IDS) ---
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    try:
+        target = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Syntax: /ban [user_id]")
+        return
+    ok = store.set_banned(target, True)
+    await update.message.reply_text(
+        f"🚫 Banned user {target}." if ok else f"⚠️ No user {target} found."
+    )
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    try:
+        target = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ Syntax: /unban [user_id]")
+        return
+    ok = store.set_banned(target, False)
+    await update.message.reply_text(
+        f"✅ Unbanned user {target}." if ok else f"⚠️ No user {target} found."
+    )
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update):
+        return
+    s = store.stats()
+    lines = [
+        "**📊 Stats**",
+        f"Users: {s['users']} ({s['banned']} banned)",
+        f"Transactions: {s['transactions']}",
+        "",
+    ]
+    for u in s["per_user"]:
+        tag = " 🚫" if u["banned"] else ""
+        handle = escape_markdown(str(u["username"] or u["user_id"]), version=1)
+        lines.append(f"`{u['user_id']}` {handle}{tag}: {u['tx_count']}")
+    await _reply_chunked(update.message, "\n".join(lines), parse_mode='Markdown')
 
 # --- TELEGRAM APPLICATION ---
 def build_application():
@@ -620,38 +393,43 @@ def build_application():
         builder = builder.updater(None)
     application = builder.build()
 
-    # Restrict every handler to the owner allowlist: messages from anyone else
-    # simply don't match, so the bot stays silent for strangers. The category
-    # callback step needs no filter — the conversation is per-user, so only the
-    # owner who passed the /spend entry filter can reach it.
-    owner = filters.User(user_id=list(ALLOWED_USER_IDS))
+    # Open self-serve: no user filter. Each handler provisions the user and checks
+    # the ban flag itself (via _gate). The category callback step needs no gate —
+    # the conversation is per-user, reachable only after spend's gate passed.
 
     # Register the multi-step add-expense flow: amount -> name -> category buttons.
     # A bare numeric message (e.g. "12.50") starts the flow — no command needed.
-    amount_msg = filters.TEXT & ~filters.COMMAND & owner & filters.Regex(r'^\d+(\.\d{1,2})?$')
+    amount_msg = filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+(\.\d{1,2})?$')
     add_expense_conv = ConversationHandler(
         entry_points=[MessageHandler(amount_msg, spend)],
         states={
-            AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND & owner, receive_name)],
+            AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_name)],
             AWAITING_CATEGORY: [CallbackQueryHandler(receive_category, pattern=r"^setcat\|")],
         },
-        fallbacks=[CommandHandler("cancel", cancel, filters=owner)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(add_expense_conv)
 
-    # Register Text Commands
-    application.add_handler(CommandHandler("undo", undo, filters=owner))
-    application.add_handler(CommandHandler("list", list_month, filters=owner))
-    application.add_handler(CommandHandler("rm", remove, filters=owner))
-    application.add_handler(CommandHandler("edit", edit, filters=owner))
+    # User commands
+    application.add_handler(CommandHandler("undo", undo))
+    application.add_handler(CommandHandler("list", list_month))
+    application.add_handler(CommandHandler("rm", remove))
+    application.add_handler(CommandHandler("edit", edit))
+    application.add_handler(CommandHandler("export", export_cmd))
+
+    # Admin commands
+    application.add_handler(CommandHandler("ban", ban_cmd))
+    application.add_handler(CommandHandler("unban", unban_cmd))
+    application.add_handler(CommandHandler("stats", stats_cmd))
     return application
 
 
 application = build_application()
 
 # --- WEB APP AUTH (Telegram Mini App initData validation) ---
-# Locally (no WEBHOOK_URL) or with ALLOW_INSECURE_WEBAPP=1 we skip auth so the
-# webapp can be previewed in a plain browser, which has no signed initData.
+# Locally (no WEBHOOK_URL) or with ALLOW_INSECURE_WEBAPP=1 we skip signature checks
+# so the webapp can be previewed in a plain browser (no signed initData) — it then
+# acts as DEV_USER_ID.
 DEV_MODE = (not WEBHOOK_URL) or os.getenv("ALLOW_INSECURE_WEBAPP") == "1"
 
 
@@ -684,17 +462,22 @@ def _init_data_user_id(auth: dict):
         return None
 
 
-async def require_auth(x_telegram_init_data: str = Header(default="")):
-    # DEV_MODE (local preview / ALLOW_INSECURE_WEBAPP) skips all checks so the
-    # webapp can be opened in a plain browser with no signed initData.
+async def require_auth(x_telegram_init_data: str = Header(default="")) -> int:
+    """Identify the Mini App user and return their numeric id. Open self-serve:
+    a valid signature is all that's required (no allowlist); the user is provisioned
+    on first call. 401 on a bad/missing signature, 403 if the user is banned."""
     if DEV_MODE:
-        return None
-    auth = validate_init_data(x_telegram_init_data)
-    if auth is None:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if _init_data_user_id(auth) not in ALLOWED_USER_IDS:
-        raise HTTPException(status_code=403, detail="Forbidden")
-    return auth
+        user_id = DEV_USER_ID
+    else:
+        auth = validate_init_data(x_telegram_init_data)
+        if auth is None:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+        user_id = _init_data_user_id(auth)
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Unauthorized")
+    if store.ensure_user(user_id):  # returns True if banned
+        raise HTTPException(status_code=403, detail="Banned")
+    return user_id
 
 
 # --- WEB API MODELS ---
@@ -735,6 +518,7 @@ class TxIn(BaseModel):
 # --- FASTAPI APP ---
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    init_schema()  # create Postgres tables/indexes if needed
     await application.initialize()
     await application.start()
     if WEBHOOK_URL:
@@ -774,21 +558,22 @@ async def telegram_webhook(request: Request):
 
 
 @app.get("/api/transactions")
-def api_list(month: str, _auth=Depends(require_auth)):
+def api_list(month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
-    return {"transactions": db.get_month(month), "categories": CATEGORIES}
+    return {"transactions": store.get_month(user_id, month), "categories": CATEGORIES}
 
 
 @app.post("/api/transactions")
-def api_add(tx: TxIn, _auth=Depends(require_auth)):
+def api_add(tx: TxIn, user_id: int = Depends(require_auth)):
     if tx.type not in VALID_TYPES:
         raise HTTPException(status_code=400, detail=f"type must be one of {sorted(VALID_TYPES)}")
     if not (tx.amount > 0):
         raise HTTPException(status_code=400, detail="amount must be greater than zero")
     if tx.date is not None:
         _require_date(tx.date)
-    created = db.add_transaction(
-        tx_type=tx.type,
+    created = store.add_transaction(
+        user_id,
+        tx.type,
         amount=round(tx.amount, 2),
         name=tx.name.strip(),
         category=tx.category.strip(),
@@ -801,11 +586,11 @@ def api_add(tx: TxIn, _auth=Depends(require_auth)):
 
 
 @app.delete("/api/transactions/{entry_id}")
-def api_delete(entry_id: str, month: str, _auth=Depends(require_auth)):
-    _require_month(month)
-    deleted = db.delete_by_id(month, entry_id)
+def api_delete(entry_id: str, month: str, user_id: int = Depends(require_auth)):
+    _require_month(month)  # accepted for API compatibility; ids are unique per user
+    deleted = store.delete_by_id(user_id, entry_id)
     if not deleted:
-        raise HTTPException(status_code=404, detail="No entry with that id this month")
+        raise HTTPException(status_code=404, detail="No entry with that id")
     return {"deleted": deleted}
 
 
@@ -821,23 +606,23 @@ def _require_positive_budget(amount: float) -> float:
 
 
 @app.get("/api/budget")
-def api_budget_get(month: str, _auth=Depends(require_auth)):
+def api_budget_get(month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
-    return db.budget_summary(month)
+    return store.budget_summary(user_id, month)
 
 
 @app.post("/api/budget")
-def api_budget_set(b: BudgetIn, month: str, _auth=Depends(require_auth)):
+def api_budget_set(b: BudgetIn, month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
-    db.set_budget(_require_positive_budget(b.amount))
-    return db.budget_summary(month)
+    store.set_budget(user_id, _require_positive_budget(b.amount))
+    return store.budget_summary(user_id, month)
 
 
 @app.delete("/api/budget")
-def api_budget_remove(month: str, _auth=Depends(require_auth)):
+def api_budget_remove(month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
-    db.remove_budget()
-    return db.budget_summary(month)
+    store.remove_budget(user_id)
+    return store.budget_summary(user_id, month)
 
 
 # --- DAILY MESSAGE CLEAR ---
@@ -872,7 +657,9 @@ async def clear_chat_messages(chat_id: int) -> int:
         return 0
 
     newest = probe.message_id
-    cleared_up_to = db.get_cleared_up_to(chat_id)
+    # In a private chat the chat_id equals the user_id, so the clear bookmark is
+    # keyed on the same id the store uses everywhere else.
+    cleared_up_to = store.get_cleared_up_to(chat_id)
     start = (cleared_up_to + 1) if cleared_up_to else max(1, newest - FIRST_RUN_LOOKBACK)
 
     deleted = 0
@@ -889,7 +676,7 @@ async def clear_chat_messages(chat_id: int) -> int:
                 pass
         except TelegramError:
             pass  # too old (>48h), already gone, or undeletable — skip it
-    db.set_cleared_up_to(chat_id, newest)
+    store.set_cleared_up_to(chat_id, newest)
     return deleted
 
 
@@ -899,8 +686,8 @@ async def api_clear(x_task_token: str = Header(default="")):
     # env var is unset the endpoint is disabled (always 403) rather than open.
     if not CLEAR_TASK_TOKEN or not hmac.compare_digest(x_task_token, CLEAR_TASK_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
-    # In private chats chat_id == user_id, so the allowlist *is* the chat list.
-    cleared = {str(cid): await clear_chat_messages(cid) for cid in ALLOWED_USER_IDS}
+    # Sweep every (non-banned) registered user — in private chats chat_id == user_id.
+    cleared = {str(uid): await clear_chat_messages(uid) for uid in store.all_user_ids()}
     return {"cleared": cleared}
 
 
