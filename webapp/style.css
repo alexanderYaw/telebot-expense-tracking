@@ -232,6 +232,8 @@ html, body {
   color: var(--text);
 }
 .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
+/* A date only needs room for its value, so don't stretch it the full form width. */
+.field input[type="date"] { width: auto; max-width: 100%; }
 .amount-input { position: relative; }
 .amount-input span { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); color: var(--hint); font-weight: 700; }
 .amount-input input { padding-left: 28px; font-size: 22px; font-weight: 700; }
