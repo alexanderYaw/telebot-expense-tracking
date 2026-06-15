@@ -320,6 +320,67 @@ html, body {
 .budget-surplus .pos { color: var(--pos); }
 .budget-surplus .neg { color: var(--neg); }
 
+/* Negative overall-surplus hero (Budget tab) turns red instead of accent */
+.hero.hero-neg { background: var(--neg); }
+
+/* ---------- Category management (Categories tab) ---------- */
+.cat-manage { display: flex; gap: 8px; margin-bottom: 12px; }
+.cat-manage input {
+  flex: 1 1 auto;
+  font: inherit;
+  padding: 10px 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 12px;
+  background: var(--card-bg);
+  color: var(--text);
+}
+.btn-mini {
+  flex: 0 0 auto;
+  border: none;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: inherit; font-weight: 700;
+  padding: 0 18px;
+  border-radius: 12px;
+  cursor: pointer;
+}
+.cat-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.cat-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px; font-weight: 600;
+  padding: 6px 8px 6px 11px;
+  border: 1.5px solid var(--line);
+  border-radius: 999px;
+}
+.cat-x {
+  border: none; background: none;
+  color: var(--hint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px;
+}
+.cat-x:hover { color: var(--neg); }
+
+/* Edit (✎) button on a recurring row */
+.tx-edit {
+  flex: 0 0 auto;
+  width: 28px; height: 28px;
+  margin-left: 2px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hint);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: background .12s, color .12s, opacity .12s;
+}
+.tx-edit:hover { background: var(--accent); color: var(--accent-ink); opacity: 1; }
+
 /* ---------- Empty state ---------- */
 .empty { text-align: center; color: var(--hint); padding: 48px 20px; }
 .empty .big { font-size: 34px; margin-bottom: 8px; }
