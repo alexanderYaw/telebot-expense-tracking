@@ -41,11 +41,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 PORT = int(os.getenv("PORT", "8080"))
 
 # Owner allowlist. Both the bot commands and the Mini App API are restricted to
-# these Telegram numeric user IDs. The account owner is hard-coded so the bot is
-# locked down by default; extra IDs can be added via the ALLOWED_USER_IDS env var
-# (comma-separated) without a code change.
-_OWNER_USER_IDS = {391409754}
-ALLOWED_USER_IDS = _OWNER_USER_IDS | {
+ALLOWED_USER_IDS = {
     int(x) for x in os.getenv("ALLOWED_USER_IDS", "").replace(" ", "").split(",") if x
 }
 
