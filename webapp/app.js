@@ -388,7 +388,7 @@ function budgetCard(t) {
     <div class="card hero hero-budget">
       <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount-row">
-        <span class="amount">${money(b.spent_this_month)} spent</span>
+        <span class="amount">${money(b.spent_this_month)}</span>
       </div>
       <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : ''}">${over ? 'over budget' : 'left to spend'}</span></div>
     </div>`;

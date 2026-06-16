@@ -97,7 +97,7 @@ html, body {
 .hero { background: var(--accent); color: var(--accent-ink); }
 .hero .card-title { color: var(--accent-ink); opacity: .8; }
 .hero .amount { font-size: 38px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
-.hero .sub { font-size: 13px; opacity: .9; }
+.hero .sub { font-size: 15px; font-weight: 200; opacity: .9; }
 
 /* Grey "Spent" summary card on Home (demoted from the orange hero) */
 .amount-lg { font-size: 32px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
@@ -107,7 +107,7 @@ html, body {
 .hero.hero-budget { background: #3b82f6; color: #fff; }
 .hero.hero-budget .card-title { color: #fff; opacity: .85; }
 /* Overspent: only the "over budget" label goes red; the number stays white. */
-.hero.hero-budget .budget-state.is-over { color: #ff5b5b; }
+.hero.hero-budget .budget-state.is-over { color: #f72626; }
 .budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
 
