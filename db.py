@@ -35,12 +35,16 @@ def _get_pool() -> ConnectionPool:
         # side ("terminating connection due to administrator command"); without a
         # check the pool would hand out a dead socket and the first query after an
         # idle gap would 500. The check makes that first call reconnect instead.
+        # prepare_threshold=None disables psycopg3's automatic server-side prepared
+        # statements. Neon's pooled endpoint (the `-pooler` host) is PgBouncer in
+        # transaction-pooling mode, where prepared statements span connections and
+        # break ("prepared statement already exists"). Harmless on a direct endpoint.
         _pool = ConnectionPool(
             dsn,
             min_size=1,
             max_size=5,
             check=ConnectionPool.check_connection,
-            kwargs={"row_factory": dict_row},
+            kwargs={"row_factory": dict_row, "prepare_threshold": None},
         )
     return _pool
 
