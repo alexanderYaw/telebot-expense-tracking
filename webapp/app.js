@@ -274,6 +274,19 @@ function toast(msg) {
   toast._t = setTimeout(() => el.classList.add('hidden'), 2200);
 }
 
+// Clear a stuck :hover highlight from a button after a cancelled confirm dialog.
+// On touch (incl. Telegram's webview, which reports hover capability) the tapped
+// element keeps :hover until the next interaction, so the red ✕ lingers after you
+// cancel a delete. blur() only drops :focus; toggling display forces the browser
+// to re-evaluate hover with no pointer present, clearing it immediately.
+function clearHover(el) {
+  if (!el) return;
+  const prev = el.style.display;
+  el.style.display = 'none';
+  void el.offsetHeight;   // force reflow
+  el.style.display = prev;
+}
+
 // --- Transaction row markup --------------------------------------
 function txRow(t) {
   const isIn = t.type !== 'Expense';
@@ -305,15 +318,18 @@ function escapeHtml(s) {
 function renderHome() {
   const t = totals(STATE.month);
   const recent = txForMonth(STATE.month).slice(0, 6);
+  // Total recurring expenses = sum of the user's active recurring expense items.
+  // STATE.recurring is lazy-loaded (null until fetched); show "…" until it arrives.
+  const recurringTotal = STATE.recurring ? STATE.recurring.reduce((a, r) => a + r.amount, 0) : null;
   $('#view-home').innerHTML = `
     ${statusBanner()}
-    <div class="card hero">
-      <p class="card-title">Spent in ${monthLabel(STATE.month)}</p>
-      <div class="amount">${money(t.spent)}</div>
-      <div class="sub">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
-    </div>
-
     ${budgetCard(t)}
+
+    <div class="card">
+      <p class="card-title">Spent in ${monthLabel(STATE.month)}</p>
+      <div class="amount-lg">${money(t.spent)}</div>
+      <div class="sub-muted">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
+    </div>
 
     <div class="stat-row">
       <div class="card stat">
@@ -321,8 +337,8 @@ function renderHome() {
         <div class="value pos">${money(t.income)}</div>
       </div>
       <div class="card stat">
-        <div class="label">Incoming funds</div>
-        <div class="value pos">${money(t.incoming)}</div>
+        <div class="label">Recurring expenses</div>
+        <div class="value">${recurringTotal == null ? '…' : money(recurringTotal)}</div>
       </div>
     </div>
 
@@ -330,10 +346,15 @@ function renderHome() {
       <p class="card-title">Recent activity</p>
       ${recent.length ? recent.map(txRow).join('') : emptyInline('Nothing logged yet')}
     </div>`;
+
+  // Lazy-load the recurring list the first time Home needs its total, then repaint.
+  if (STATE.recurring === null) {
+    ensureRecurring().then(() => { if (STATE.activeTab === 'home') renderHome(); });
+  }
 }
 
-// Budget summary shown on Home: amount left to spend (green) / overspend (red),
-// this-month expenditure, and the overall budget surplus across all months.
+// Budget summary shown on Home as a prominent blue hero card: amount left to spend
+// (or overspend) inline with its label, and this-month spending vs the budget.
 function budgetCard(t) {
   const b = STATE.budget;
   // No budget configured for this month → invite the user to set one.
@@ -348,10 +369,13 @@ function budgetCard(t) {
   const left = b.left;                       // budget − spent (negative = overspent)
   const over = left < 0;
   return `
-    <div class="card">
+    <div class="card hero hero-budget">
       <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
-      <div class="budget-amount ${over ? 'neg' : 'pos'}">${over ? '−' : ''}${money(Math.abs(left))}</div>
-      <div class="sub">${over ? 'over budget' : 'left to spend'} · ${money(b.spent_this_month)} of ${money(b.budget)} used</div>
+      <div class="budget-amount-row">
+        <span class="amount">${over ? '−' : ''}${money(Math.abs(left))}</span>
+        <span class="budget-amount-label">${over ? 'over budget' : 'left to spend'}</span>
+      </div>
+      <div class="sub">${money(b.spent_this_month)} of ${money(b.budget)} used</div>
     </div>`;
 }
 
@@ -730,8 +754,8 @@ function openCategoryModal() {
     </div>`;
   document.body.appendChild(root);
   wireCategoryModal(root);
-  const input = $('#new-cat', root);
-  if (input) input.focus();
+  // Intentionally don't autofocus the input — that would pop the keyboard the moment
+  // the popup opens. The user taps the field when they actually want to add one.
 }
 
 function wireCategoryModal(root) {
@@ -744,7 +768,7 @@ function wireCategoryModal(root) {
   const newCat = $('#new-cat', root);
   if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
   root.querySelectorAll('[data-rmcat]').forEach((b) =>
-    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat)));
+    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat, b)));
 }
 
 function closeCategoryModal() {
@@ -759,7 +783,7 @@ function refreshCategoryModal() {
   if (!list) return;
   list.innerHTML = categoryTagsHtml();
   list.querySelectorAll('[data-rmcat]').forEach((b) =>
-    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat)));
+    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat, b)));
 }
 
 async function onCategoryAdd() {
@@ -777,11 +801,12 @@ async function onCategoryAdd() {
   }
 }
 
-async function onCategoryRemove(name) {
+async function onCategoryRemove(name, btn) {
   const ok = (tg && tg.showConfirm)
     ? await new Promise((res) => tg.showConfirm(`Remove category "${name}"? Past expenses keep it.`, res))
     : window.confirm(`Remove category "${name}"?`);
-  if (!ok) return;
+  // Cancelled → clear the stuck hover highlight on the ✕ without re-rendering.
+  if (!ok) { clearHover(btn); return; }
   try {
     STATE.categories = await API.categoryRemove(name);
     if (STATE.categoryFilter === name) STATE.categoryFilter = 'All';
@@ -924,8 +949,8 @@ $('#app').addEventListener('click', async (e) => {
   const ok = (tg && tg.showConfirm)
     ? await new Promise((res) => tg.showConfirm('Delete this entry?', res))
     : window.confirm('Delete this entry?');
-  // Cancelled → drop focus so the button doesn't keep any active/hover styling.
-  if (!ok) { del.blur(); return; }
+  // Cancelled → clear the stuck hover/focus highlight without re-rendering the view.
+  if (!ok) { del.blur(); clearHover(del); return; }
   del.disabled = true;
   try {
     await API.remove(id, month);

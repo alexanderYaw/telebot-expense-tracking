@@ -99,6 +99,16 @@ html, body {
 .hero .amount { font-size: 38px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
 .hero .sub { font-size: 13px; opacity: .9; }
 
+/* Grey "Spent" summary card on Home (demoted from the orange hero) */
+.amount-lg { font-size: 32px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
+.sub-muted { font-size: 13px; color: var(--hint); }
+
+/* Blue budget hero on Home: "left to spend" sits inline with the amount */
+.hero.hero-budget { background: #3b82f6; color: #fff; }
+.hero.hero-budget .card-title { color: #fff; opacity: .85; }
+.budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
+
 /* Stat row */
 .stat-row { display: flex; gap: 12px; margin-bottom: 14px; }
 .stat-row .card { flex: 1; margin-bottom: 0; padding: 14px; }
