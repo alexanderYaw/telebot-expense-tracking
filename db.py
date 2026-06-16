@@ -30,8 +30,17 @@ def _get_pool() -> ConnectionPool:
         dsn = os.getenv("DATABASE_URL")
         if not dsn:
             raise RuntimeError("DATABASE_URL is not set")
+        # check_connection validates (and transparently recycles) each connection
+        # on checkout. Neon scales to zero and terminates idle connections server-
+        # side ("terminating connection due to administrator command"); without a
+        # check the pool would hand out a dead socket and the first query after an
+        # idle gap would 500. The check makes that first call reconnect instead.
         _pool = ConnectionPool(
-            dsn, min_size=1, max_size=5, kwargs={"row_factory": dict_row}
+            dsn,
+            min_size=1,
+            max_size=5,
+            check=ConnectionPool.check_connection,
+            kwargs={"row_factory": dict_row},
         )
     return _pool
 
