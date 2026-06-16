@@ -369,9 +369,9 @@ function renderHome() {
     ${budgetCard(t)}
 
     <div class="card">
-      <p class="card-title">Spent in ${monthLabel(STATE.month)}</p>
+      <p class="card-title">Expenditure in ${monthLabel(STATE.month)}</p>
       <div class="amount-lg">${money(t.spent)}</div>
-      <div class="sub-muted">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
+      <div class="sub-muted ${t.net >= 0 ? 'pos' : 'neg'}">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
     </div>
 
     <div class="stat-row">
@@ -399,7 +399,7 @@ function budgetCard(t) {
   if (!b || b.budget == null) {
     return `
       <div class="card">
-        <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
+        <p class="card-title">Budget spent · ${monthLabel(STATE.month)}</p>
         <div class="sub">No budget set for this month.</div>
         <button class="btn-primary" data-goto="budget">Set a budget</button>
       </div>`;
@@ -412,7 +412,7 @@ function budgetCard(t) {
       <div class="budget-amount-row">
         <span class="amount">${money(b.spent_this_month)}</span>
       </div>
-      <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : 'is-under'}">${over ? 'over budget' : 'left to spend'}</span></div>
+      <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : ' is-under'}">${over ? 'over budget' : 'left to spend'}</span></div>
     </div>`;
 }
 
@@ -420,7 +420,7 @@ function emptyInline(msg) {
   return `<div class="empty"><div class="big">🗒️</div>${msg}</div>`;
 }
 
-// ============================================================
+// =======================================
 //  VIEW: ADD  (recurring expense / income / incoming + one-off)
 // ============================================================
 const ADD_TYPES = [
@@ -435,7 +435,7 @@ function renderAdd() {
     `<button data-add="${a.key}" class="${STATE.addType === a.key ? 'is-active' : ''}">${a.label}</button>`
   ).join('');
 
-  // The Recurring section also lists every active recurring expense to edit/delete.
+  // The Recurring section===================== also lists every active recurring expense to edit/delete.
   const recurringList = STATE.addType === 'recurring'
     ? `<div class="card"><p class="card-title">Active recurring expenses</p>${recurringListBody()}</div>`
     : '';
