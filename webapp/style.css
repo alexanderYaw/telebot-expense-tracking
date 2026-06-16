@@ -106,6 +106,8 @@ html, body {
 /* Blue budget hero on Home: "left to spend" sits inline with the amount */
 .hero.hero-budget { background: #3b82f6; color: #fff; }
 .hero.hero-budget .card-title { color: #fff; opacity: .85; }
+/* Overspent: only the "over budget" label goes red; the number stays white. */
+.hero.hero-budget .budget-state.is-over { color: #ff5b5b; }
 .budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
 
@@ -147,26 +149,6 @@ html, body {
 .tx-sub { font-size: 12px; color: var(--hint); margin-top: 2px; }
 .tx-amt { font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tx-amt.pos { color: var(--pos); }
-.tx-del {
-  flex: 0 0 auto;
-  width: 28px; height: 28px;
-  margin-left: 2px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--hint);
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0.55;
-  transition: background 0.12s, color 0.12s, opacity 0.12s;
-}
-/* Only on real pointer devices — on touch, :hover sticks after a tap (the red
-   highlight would stay on the ✕ after you cancel the delete confirm). */
-@media (hover: hover) {
-  .tx-del:hover { background: var(--neg); color: #fff; opacity: 1; }
-}
-.tx-del:disabled { opacity: 0.3; cursor: default; }
 
 /* Loading / error banner */
 .banner {

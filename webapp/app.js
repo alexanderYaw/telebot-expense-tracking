@@ -297,14 +297,14 @@ function txRow(t) {
   const iconBg = t.type === 'Expense' ? catColor(t.category) : 'var(--pos)';
   const icon = t.type === 'Expense' ? catIcon(t.category) : (t.type === 'Income' ? '💰' : '🤝');
   return `
-    <div class="tx">
+    <div class="tx tappable" data-edit-tx="${escapeHtml(t.id || '')}" data-month="${(t.date || '').slice(0, 7)}" role="button" tabindex="0">
       <div class="tx-icon" style="background:${iconBg}22;color:${t.type==='Expense'?catColor(t.category):'var(--pos)'}">${icon}</div>
       <div class="tx-main">
         <div class="tx-name">${escapeHtml(t.name || '(no name)')}${t.recurring ? ' 🔁' : ''}</div>
         <div class="tx-sub">${pillHtml} · ${dayLabel(t.date)}${t.budget_excluded ? ' · <span class="off-budget">off-budget</span>' : ''}</div>
       </div>
       <div class="tx-amt ${isIn ? 'pos' : ''}">${sign}${money(t.amount)}</div>
-      <button class="tx-del" data-del="${escapeHtml(t.id || '')}" data-month="${(t.date || '').slice(0, 7)}" aria-label="Delete" title="Delete">✕</button>
+      <span class="tx-chevron" aria-hidden="true">›</span>
     </div>`;
 }
 
@@ -361,7 +361,7 @@ function budgetCard(t) {
   if (!b || b.budget == null) {
     return `
       <div class="card">
-        <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
+        <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
         <div class="sub">No budget set for this month.</div>
         <button class="btn-primary" data-goto="budget">Set a budget</button>
       </div>`;
@@ -370,12 +370,11 @@ function budgetCard(t) {
   const over = left < 0;
   return `
     <div class="card hero hero-budget">
-      <p class="card-title">Budget · ${monthLabel(STATE.month)}</p>
+      <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount-row">
-        <span class="amount">${over ? '−' : ''}${money(Math.abs(left))}</span>
-        <span class="budget-amount-label">${over ? 'over budget' : 'left to spend'}</span>
+        <span class="sub">${money(b.spent_this_month)} spent</span>
       </div>
-      <div class="sub">${money(b.spent_this_month)} of ${money(b.budget)} used</div>
+      <div class="amount">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : ''}">${over ? 'over budget' : 'left to spend'}</span></div>
     </div>`;
 }
 
@@ -820,6 +819,116 @@ async function onCategoryRemove(name, btn) {
 }
 
 // ============================================================
+//  Edit / delete a transaction (popup)
+// ============================================================
+// Tapping any transaction row opens this popup; delete lives inside it (rows no
+// longer carry an inline ✕). The PATCH endpoint supports name/amount/category/
+// budget_excluded — date and type aren't editable here.
+function openTxEditModal(id, month) {
+  const tx = (STATE.cache[month] || []).find((t) => t.id === id);
+  if (!tx) { toast('⚠️ Could not find that entry'); return; }
+  const isExpense = tx.type === 'Expense';
+  const kind = isExpense ? 'expense' : (tx.type === 'Income' ? 'income' : 'incoming');
+  const nameLabel = tx.type === 'Income' ? 'Source' : (tx.type === 'Incoming' ? 'From' : 'Name');
+
+  // Category chips + budget-exclusion toggle only apply to expenses.
+  const catChips = isExpense ? STATE.categories.map((c) => {
+    const active = tx.category === c;
+    const style = active ? `background:${catColor(c)};border-color:${catColor(c)};color:#fff` : '';
+    return `<button data-ecat="${escapeHtml(c)}" class="chip ${active ? 'is-active' : ''}" style="${style}">${catIcon(c)} ${escapeHtml(c)}</button>`;
+  }).join('') : '';
+  const catField = isExpense ? `<div class="field"><label>Category</label><div class="cat-grid">${catChips}</div></div>` : '';
+  const excludeField = isExpense ? `
+    <label class="switch-field">
+      <span class="switch-label">Exclude from monthly budget</span>
+      <span class="switch"><input id="e-exclude" type="checkbox" ${tx.budget_excluded ? 'checked' : ''}><span class="slider"></span></span>
+    </label>` : '';
+
+  const root = document.createElement('div');
+  root.className = 'modal-overlay';
+  root.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-head"><span>Edit ${kind} · ${dayLabel(tx.date)}</span><button class="modal-close" aria-label="Close">✕</button></div>
+      <div class="field"><label>${nameLabel}</label><input id="e-name" value="${escapeHtml(tx.name || '')}"></div>
+      <div class="field"><label>Amount</label><div class="amount-input"><span>$</span><input id="e-amount" type="number" inputmode="decimal" step="0.01" min="0" value="${tx.amount}"></div></div>
+      ${catField}
+      ${excludeField}
+      <button id="e-save" class="btn-primary">Save changes</button>
+      <button id="e-delete" class="btn-secondary">Delete</button>
+    </div>`;
+  document.body.appendChild(root);
+
+  // Track the chosen category as the user taps chips (expense only).
+  const chosen = { category: tx.category };
+  root.querySelectorAll('[data-ecat]').forEach((c) =>
+    c.addEventListener('click', () => {
+      chosen.category = c.dataset.ecat;
+      root.querySelectorAll('[data-ecat]').forEach((chip) => {
+        const active = chip.dataset.ecat === chosen.category;
+        chip.classList.toggle('is-active', active);
+        chip.style.cssText = active ? `background:${catColor(chip.dataset.ecat)};border-color:${catColor(chip.dataset.ecat)};color:#fff` : '';
+      });
+    }));
+
+  // Close on backdrop tap or the ✕.
+  root.addEventListener('click', (e) => {
+    if (e.target === root || e.target.closest('.modal-close')) root.remove();
+  });
+  $('#e-save', root).addEventListener('click', () => onTxEditSave(tx, month, chosen, root));
+  $('#e-delete', root).addEventListener('click', () => onTxDelete(tx, month, root));
+}
+
+async function onTxEditSave(tx, month, chosen, root) {
+  const amount = parseFloat(($('#e-amount', root) || {}).value);
+  if (!amount || amount <= 0) { toast('⚠️ Enter an amount greater than 0'); return; }
+  const name = (($('#e-name', root) || {}).value || '').trim();
+  const patch = { name, amount };
+  if (tx.type === 'Expense') {
+    patch.category = chosen.category;
+    patch.budget_excluded = !!(($('#e-exclude', root) || {}).checked);
+  }
+  const btn = $('#e-save', root);
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    await API.edit(tx.id, patch);
+    invalidate(month);
+    invalidateBudget();
+    if (tx.recurring) STATE.recurring = null;   // a recurring item changed → reload
+    haptic('success');
+    toast('✅ Updated');
+    root.remove();
+    await refreshActive();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Could not save'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Save changes'; }
+  }
+}
+
+async function onTxDelete(tx, month, root) {
+  const ok = (tg && tg.showConfirm)
+    ? await new Promise((res) => tg.showConfirm('Delete this entry?', res))
+    : window.confirm('Delete this entry?');
+  if (!ok) return;
+  const btn = $('#e-delete', root);
+  if (btn) { btn.disabled = true; btn.textContent = 'Deleting…'; }
+  try {
+    await API.remove(tx.id, month);
+    invalidate(month);
+    invalidateBudget();
+    if (tx.recurring) STATE.recurring = null;
+    haptic('success');
+    toast('🗑️ Deleted');
+    root.remove();
+    await refreshActive();
+  } catch (e) {
+    haptic('error');
+    toast('⚠️ ' + (e.message || 'Delete failed'));
+    if (btn) { btn.disabled = false; btn.textContent = 'Delete'; }
+  }
+}
+
+// ============================================================
 //  VIEW: BUDGET  (total savings + set / edit / remove budget)
 // ============================================================
 function renderBudget() {
@@ -939,32 +1048,11 @@ $('#app').addEventListener('click', (e) => {
   if (goto) switchTab(goto.dataset.goto);
 });
 
-// Delete: one delegated handler covers tx rows in any view.
-$('#app').addEventListener('click', async (e) => {
-  const del = e.target.closest('[data-del]');
-  if (!del) return;
-  const id = del.dataset.del;
-  const month = del.dataset.month;
-  if (!id) { toast('⚠️ Missing id'); return; }
-  const ok = (tg && tg.showConfirm)
-    ? await new Promise((res) => tg.showConfirm('Delete this entry?', res))
-    : window.confirm('Delete this entry?');
-  // Cancelled → clear the stuck hover/focus highlight without re-rendering the view.
-  if (!ok) { del.blur(); clearHover(del); return; }
-  del.disabled = true;
-  try {
-    await API.remove(id, month);
-    invalidate(month);
-    invalidateBudget();
-    if (del.dataset.recurring) STATE.recurring = null;  // reload the recurring list
-    haptic('success');
-    toast('🗑️ Deleted');
-    await refreshActive();
-  } catch (err) {
-    haptic('error');
-    toast('⚠️ ' + (err.message || 'Delete failed'));
-    del.disabled = false;
-  }
+// Tap a transaction row to open its edit/delete popup (covers rows in any view).
+$('#app').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-edit-tx]');
+  if (!row) return;
+  openTxEditModal(row.dataset.editTx, row.dataset.month);
 });
 
 // Initial load: keep the full-screen loader up until categories + the first
