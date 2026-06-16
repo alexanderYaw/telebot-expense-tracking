@@ -44,7 +44,6 @@ const CAT_STYLE = {
   Shopping:  { color: '#a855f7', icon: '🛍️' },
   Groceries: { color: '#14b8a6', icon: '🛒' },
   Bills:     { color: '#f59e0b', icon: '🧾' },
-  Climbing:  { color: '#ef4444', icon: '🧗' },
   Others:    { color: '#8a909c', icon: '•' },
 };
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',

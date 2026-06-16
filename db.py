@@ -16,7 +16,7 @@ from psycopg_pool import ConnectionPool
 
 # Seeded for each user the first time their categories are read. After that the
 # list is fully user-editable (add/remove) and stored per user.
-DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Climbing", "Others"]
+DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Others"]
 
 # Neon/Supabase connection strings already carry `sslmode=require`.
 _pool: ConnectionPool | None = None

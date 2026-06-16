@@ -108,7 +108,7 @@ html, body {
 .hero.hero-budget .card-title { color: #fff; opacity: .85; }
 /* Overspent: only the "over budget" label goes red; the number stays white. */
 .hero.hero-budget .budget-state.is-over { color: var(--neg); }
-.hero.hero-budget .budget-state.is-over { color: var(--pos); }
+.hero.hero-budget .budget-state.is-under { color: var(--pos); }
 .budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
 
