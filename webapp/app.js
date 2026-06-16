@@ -390,7 +390,7 @@ function budgetCard(t) {
       <div class="budget-amount-row">
         <span class="amount">${money(b.spent_this_month)}</span>
       </div>
-      <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : ''}">${over ? 'over budget' : 'left to spend'}</span></div>
+      <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : 'is-under'}">${over ? 'over budget' : 'left to spend'}</span></div>
     </div>`;
 }
 
@@ -955,6 +955,17 @@ function renderBudget() {
 
   $('#view-budget').innerHTML = `
     ${statusBanner()}
+    <div class="card">
+      <p class="card-title">Monthly budget</p>
+      <div class="field">
+        <label>Budget amount</label>
+        <div class="amount-input"><span>$</span><input id="b-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${hasBudget ? b.budget : ''}"></div>
+      </div>
+      <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
+      <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
+      ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
+    </div>
+
     <div class="card hero">
       <p class="card-title">Total savings</p>
       <div class="amount">${savings == null ? '—' : (savings < 0 ? '−' : '') + money(Math.abs(savings))}</div>
@@ -967,15 +978,6 @@ function renderBudget() {
       <div class="sub">Budget minus spending, summed across every budgeted month</div>
     </div>
 
-    <div class="card">
-      <p class="card-title">Monthly budget</p>
-      <div class="field">
-        <label>Budget amount</label>
-        <div class="amount-input"><span>$</span><input id="b-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${hasBudget ? b.budget : ''}"></div>
-      </div>
-      <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
-      <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
-      ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
     </div>`;
 
   const save = $('#b-save');
