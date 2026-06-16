@@ -733,6 +733,20 @@ def api_budget_remove(month: str, user_id: int = Depends(require_auth)):
     return store.budget_summary(user_id, month)
 
 
+@app.get("/api/home")
+def api_home(month: str, user_id: int = Depends(require_auth)):
+    """Everything the Home screen needs in one round-trip — month transactions,
+    the recurring list, categories and the budget summary — so opening the app is a
+    single request instead of four separate /api calls."""
+    _require_month(month)
+    return {
+        "transactions": store.get_month(user_id, month),
+        "recurring": store.recurring_transactions(user_id),
+        "categories": store.get_categories(user_id),
+        "budget": store.budget_summary(user_id, month),
+    }
+
+
 # --- DAILY MESSAGE CLEAR ---
 # Triggered by an external cron (e.g. cron-job.org / GitHub Actions) at 00:00
 # SGT, since Render's free tier sleeps and an in-app scheduler would be skipped.

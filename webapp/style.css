@@ -27,6 +27,10 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* The inner .view is the only scroller — keep the page itself fixed so a flick
+     past the end of a list doesn't rubber-band the whole app (tab bar included). */
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--page-bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -71,6 +75,7 @@ html, body {
 .view {
   flex: 1 1 auto;
   overflow-y: auto;
+  overscroll-behavior: contain;   /* don't chain the scroll out to the page / tab bar */
   padding: 4px 16px 96px;   /* bottom padding clears the tab bar */
   -webkit-overflow-scrolling: touch;
 }
@@ -97,7 +102,7 @@ html, body {
 .hero { background: var(--accent); color: var(--accent-ink); }
 .hero .card-title { color: var(--accent-ink); opacity: .8; }
 .hero .amount { font-size: 38px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
-.hero .sub { font-size: 13px; opacity: .9; }
+.hero .sub { font-size: 15px; font-weight: 600; opacity: .9; }
 
 /* Grey "Spent" summary card on Home (demoted from the orange hero) */
 .amount-lg { font-size: 32px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
@@ -107,7 +112,8 @@ html, body {
 .hero.hero-budget { background: #3b82f6; color: #fff; }
 .hero.hero-budget .card-title { color: #fff; opacity: .85; }
 /* Overspent: only the "over budget" label goes red; the number stays white. */
-.hero.hero-budget .budget-state.is-over { color: #ff5b5b; }
+.hero.hero-budget .budget-state.is-over { color: var(--neg); }
+.hero.hero-budget .budget-state.is-under { color: var(--pos); }
 .budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
 

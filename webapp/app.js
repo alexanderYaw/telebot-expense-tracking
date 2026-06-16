@@ -44,7 +44,6 @@ const CAT_STYLE = {
   Shopping:  { color: '#a855f7', icon: '🛍️' },
   Groceries: { color: '#14b8a6', icon: '🛒' },
   Bills:     { color: '#f59e0b', icon: '🧾' },
-  Climbing:  { color: '#ef4444', icon: '🧗' },
   Others:    { color: '#8a909c', icon: '•' },
 };
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
@@ -90,6 +89,12 @@ const API = {
     const r = await fetch(`/api/transactions?month=${month}`, { headers: this.headers() });
     if (!r.ok) throw new Error(`Load failed (${r.status})`);
     return (await r.json()).transactions;
+  },
+  // One request for the whole Home screen: { transactions, recurring, categories, budget }.
+  async home(month) {
+    const r = await fetch(`/api/home?month=${month}`, { headers: this.headers() });
+    if (!r.ok) throw new Error(`Load failed (${r.status})`);
+    return await r.json();
   },
   async add(tx) {
     const r = await fetch('/api/transactions', {
@@ -184,17 +189,6 @@ async function detail(r) {
 // savings — force the next ensureBudget to refetch.
 function invalidateBudget() { STATE.budgetMonth = null; }
 
-// Load the user's categories once (kept in sync directly on add/remove).
-async function ensureCategories({ force = false } = {}) {
-  if (!force && STATE.categories.length) return;
-  try {
-    STATE.categories = await API.categories();
-    if (!STATE.categories.includes(STATE.addCategory)) STATE.addCategory = STATE.categories[0] || '';
-  } catch (e) {
-    STATE.error = e.message || 'Could not load categories';
-  }
-}
-
 // Load the active recurring transactions for the Recurring section.
 async function ensureRecurring({ force = false } = {}) {
   if (!force && STATE.recurring) return;
@@ -217,12 +211,38 @@ async function ensureBudget(ym, { force = false } = {}) {
   }
 }
 
-// Re-fetch the active month and re-render the current tab.
+// Load everything the Home screen needs in a single /api/home request: the month's
+// transactions, the recurring list, categories and the budget summary. Populates the
+// same STATE caches the per-resource loaders use, so the other tabs keep working.
+async function ensureHome(ym, { force = false } = {}) {
+  if (!force && STATE.cache[ym] && STATE.recurring && STATE.categories.length
+      && STATE.budgetMonth === ym && STATE.budget) return;
+  STATE.loading = true;
+  STATE.error = null;
+  try {
+    const d = await API.home(ym);
+    STATE.cache[ym] = d.transactions;
+    STATE.recurring = d.recurring;
+    STATE.categories = d.categories;
+    if (!STATE.categories.includes(STATE.addCategory)) STATE.addCategory = STATE.categories[0] || '';
+    STATE.budget = d.budget;
+    STATE.budgetMonth = ym;
+  } catch (e) {
+    STATE.error = e.message || 'Could not load data';
+    STATE.cache[ym] = STATE.cache[ym] || [];
+  } finally {
+    STATE.loading = false;
+  }
+}
+
+// Re-fetch the active tab's data and re-render. Home pulls everything in one request.
 async function refreshActive() {
-  await ensureMonth(STATE.month, { force: true });
-  invalidateBudget();
-  if (STATE.activeTab === 'home' || STATE.activeTab === 'budget') {
-    await ensureBudget(STATE.month);
+  invalidateBudget();   // any add/delete can change the surplus / savings / left
+  if (STATE.activeTab === 'home') {
+    await ensureHome(STATE.month, { force: true });
+  } else {
+    await ensureMonth(STATE.month, { force: true });
+    if (STATE.activeTab === 'budget') await ensureBudget(STATE.month);
   }
   RENDERERS[STATE.activeTab]();
 }
@@ -346,11 +366,6 @@ function renderHome() {
       <p class="card-title">Recent activity</p>
       ${recent.length ? recent.map(txRow).join('') : emptyInline('Nothing logged yet')}
     </div>`;
-
-  // Lazy-load the recurring list the first time Home needs its total, then repaint.
-  if (STATE.recurring === null) {
-    ensureRecurring().then(() => { if (STATE.activeTab === 'home') renderHome(); });
-  }
 }
 
 // Budget summary shown on Home as a prominent blue hero card: amount left to spend
@@ -372,9 +387,9 @@ function budgetCard(t) {
     <div class="card hero hero-budget">
       <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount-row">
-        <span class="sub">${money(b.spent_this_month)} spent</span>
+        <span class="amount">${money(b.spent_this_month)}</span>
       </div>
-      <div class="amount">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : ''}">${over ? 'over budget' : 'left to spend'}</span></div>
+      <div class="sub">${money(Math.abs(left))} <span class="budget-state${over ? ' is-over' : 'is-under'}">${over ? 'over budget' : 'left to spend'}</span></div>
     </div>`;
 }
 
@@ -939,6 +954,17 @@ function renderBudget() {
 
   $('#view-budget').innerHTML = `
     ${statusBanner()}
+    <div class="card">
+      <p class="card-title">Monthly budget</p>
+      <div class="field">
+        <label>Budget amount</label>
+        <div class="amount-input"><span>$</span><input id="b-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${hasBudget ? b.budget : ''}"></div>
+      </div>
+      <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
+      <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
+      ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
+    </div>
+
     <div class="card hero">
       <p class="card-title">Total savings</p>
       <div class="amount">${savings == null ? '—' : (savings < 0 ? '−' : '') + money(Math.abs(savings))}</div>
@@ -951,15 +977,6 @@ function renderBudget() {
       <div class="sub">Budget minus spending, summed across every budgeted month</div>
     </div>
 
-    <div class="card">
-      <p class="card-title">Monthly budget</p>
-      <div class="field">
-        <label>Budget amount</label>
-        <div class="amount-input"><span>$</span><input id="b-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${hasBudget ? b.budget : ''}"></div>
-      </div>
-      <p class="hint-text">Applies from ${monthLabel(thisMonthISO())} onward. Past months keep their budget.</p>
-      <button id="b-save" class="btn-primary">${hasBudget ? 'Update budget' : 'Set budget'}</button>
-      ${hasBudget ? `<button id="b-remove" class="btn-secondary">Remove budget</button>` : ''}
     </div>`;
 
   const save = $('#b-save');
@@ -1023,14 +1040,14 @@ async function switchTab(tab) {
   RENDERERS[tab]();                 // paint immediately (Add tab needs no data)
   $('.view').scrollTop = 0;
   // The data-backed tabs need the active month loaded; fetch then repaint.
-  if (tab !== 'add') {
+  if (tab === 'home') {
+    await ensureHome(STATE.month);  // tx + recurring + categories + budget in one request
+  } else if (tab !== 'add') {
     await ensureMonth(STATE.month);
-    // Home reflects the month being viewed; the Budget tab always edits the
-    // current calendar month (budget changes apply from now on).
-    if (tab === 'home') await ensureBudget(STATE.month);
-    else if (tab === 'budget') await ensureBudget(thisMonthISO());
-    if (STATE.activeTab === tab) RENDERERS[tab]();
+    // The Budget tab always edits the current calendar month (changes apply from now on).
+    if (tab === 'budget') await ensureBudget(thisMonthISO());
   }
+  if (tab !== 'add' && STATE.activeTab === tab) RENDERERS[tab]();
 }
 
 function syncMonthPill() { $('#month-pill').textContent = monthLabel(STATE.month); }
@@ -1055,12 +1072,11 @@ $('#app').addEventListener('click', (e) => {
   openTxEditModal(row.dataset.editTx, row.dataset.month);
 });
 
-// Initial load: keep the full-screen loader up until categories + the first
-// month's data have been fetched and Home has painted, then reveal the app.
+// Initial load: keep the full-screen loader up until Home's data has been fetched
+// (one /api/home request) and Home has painted, then reveal the app.
 syncMonthPill();
 (async () => {
   try {
-    await ensureCategories();
     await switchTab('home');
   } finally {
     const loader = $('#loader');
