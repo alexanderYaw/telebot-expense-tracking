@@ -27,6 +27,10 @@
 html, body {
   margin: 0;
   height: 100%;
+  /* The inner .view is the only scroller — keep the page itself fixed so a flick
+     past the end of a list doesn't rubber-band the whole app (tab bar included). */
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--page-bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -71,6 +75,7 @@ html, body {
 .view {
   flex: 1 1 auto;
   overflow-y: auto;
+  overscroll-behavior: contain;   /* don't chain the scroll out to the page / tab bar */
   padding: 4px 16px 96px;   /* bottom padding clears the tab bar */
   -webkit-overflow-scrolling: touch;
 }
