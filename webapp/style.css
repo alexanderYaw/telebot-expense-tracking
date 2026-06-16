@@ -397,6 +397,18 @@ html, body {
 }
 .cat-create-top #new-cat { flex: 1 1 auto; min-width: 0; }
 .cat-create-top .emoji-input { flex: 0 0 auto; width: 52px; text-align: center; font-size: 20px; padding: 10px 0; }
+/* Emoji quick-pick palette */
+.emoji-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.emoji-opt {
+  width: 36px; height: 36px;
+  border: 1.5px solid var(--line);
+  border-radius: 10px;
+  background: var(--card-bg);
+  font-size: 18px; line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+.emoji-opt.is-active { border-color: var(--accent); background: #34373e; }
 .swatches { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
 .swatch {
   width: 28px; height: 28px;

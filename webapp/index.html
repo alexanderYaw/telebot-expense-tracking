@@ -7,7 +7,8 @@
   <!-- Telegram Mini App SDK. No-op when the page is opened directly in a browser,
        so this prototype still works standalone for design review. -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="style.css" />
+  <!-- ?v= busts the Telegram/browser cache on each asset change. Bump on deploy. -->
+  <link rel="stylesheet" href="style.css?v=3" />
 </head>
 <body>
   <!-- Full-screen loader shown until the first month's data has loaded.
@@ -61,6 +62,6 @@
   <!-- Lightweight toast for fake submits -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>

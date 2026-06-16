@@ -48,6 +48,11 @@ const CAT_STYLE = {
 };
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
   '#eab308', '#06b6d4', '#f43f5e', '#84cc16', '#6366f1', '#d946ef'];
+// Quick-pick emojis for the new-category form (the OS emoji keyboard can't be forced
+// open for a web input, so we offer a tappable palette; the field still accepts any
+// emoji the user types or pastes).
+const EMOJI_CHOICES = ['🍜', '🍔', '☕', '🛒', '🛍️', '🚌', '🚗', '⛽', '🏠', '💡',
+  '🧾', '💊', '🏥', '🎬', '🎮', '✈️', '🏋️', '🧗', '🐶', '🎁', '💰', '📚', '👕', '💅'];
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
 // Resolution order: the user's chosen icon/colour for the category (from /api) →
 // a hand-picked style for known default names → a deterministic palette colour and
@@ -783,6 +788,9 @@ function openCategoryModal() {
           <input id="new-cat-icon" class="emoji-input" placeholder="🙂" maxlength="8" inputmode="text" aria-label="Emoji">
           <input id="new-cat" placeholder="New category" maxlength="24">
         </div>
+        <div class="emoji-picker" id="emoji-picker">${EMOJI_CHOICES.map((e) =>
+          `<button class="emoji-opt" type="button" data-emoji="${e}">${e}</button>`
+        ).join('')}</div>
         <div class="swatches" id="cat-swatches">${CAT_PALETTE.map((col, i) =>
           `<button class="swatch${i === 0 ? ' is-active' : ''}" data-color="${col}" style="background:${col}" aria-label="Colour"></button>`
         ).join('')}</div>
@@ -805,6 +813,20 @@ function wireCategoryModal(root) {
   if (addCat) addCat.addEventListener('click', onCategoryAdd);
   const newCat = $('#new-cat', root);
   if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
+  // Emoji quick-pick: tapping one fills the emoji field (which onCategoryAdd reads).
+  root.querySelectorAll('#emoji-picker .emoji-opt').forEach((b) =>
+    b.addEventListener('click', () => {
+      const iconEl = $('#new-cat-icon', root);
+      if (iconEl) iconEl.value = b.dataset.emoji;
+      root.querySelectorAll('#emoji-picker .emoji-opt').forEach((x) => x.classList.remove('is-active'));
+      b.classList.add('is-active');
+    }));
+  // Keep the picker's highlight in sync if the user types/clears the field by hand.
+  const iconInput = $('#new-cat-icon', root);
+  if (iconInput) iconInput.addEventListener('input', () => {
+    root.querySelectorAll('#emoji-picker .emoji-opt').forEach((x) =>
+      x.classList.toggle('is-active', x.dataset.emoji === iconInput.value));
+  });
   // Colour swatches: tapping one selects it (single active swatch).
   root.querySelectorAll('#cat-swatches .swatch').forEach((s) =>
     s.addEventListener('click', () => {
@@ -843,6 +865,7 @@ async function onCategoryAdd() {
     setCategories(await API.categoryAdd(name, icon, color));
     if (nameEl) nameEl.value = '';
     if (iconEl) iconEl.value = '';
+    root.querySelectorAll('#emoji-picker .emoji-opt.is-active').forEach((x) => x.classList.remove('is-active'));
     haptic('success');
     refreshCategoryModal();
   } catch (e) {
