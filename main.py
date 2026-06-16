@@ -799,6 +799,15 @@ async def api_clear(x_task_token: str = Header(default="")):
     return {"cleared": cleared}
 
 
+@app.get("/health")
+def health():
+    """Keep-alive target for an external cron (every ~10 min) so Render's free
+    instance never spins down. The SELECT 1 also keeps the scale-to-zero DB warm,
+    killing both cold starts in one ping. Public + cheap; exposes nothing."""
+    store.ping()
+    return {"ok": True}
+
+
 # Serve the Mini App's static files. Mounted last so it doesn't shadow the
 # API/webhook routes above. html=True makes "/" serve index.html.
 _WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")

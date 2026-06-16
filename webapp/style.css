@@ -151,7 +151,11 @@ html, body {
   opacity: 0.55;
   transition: background 0.12s, color 0.12s, opacity 0.12s;
 }
-.tx-del:hover { background: var(--neg); color: #fff; opacity: 1; }
+/* Only on real pointer devices — on touch, :hover sticks after a tap (the red
+   highlight would stay on the ✕ after you cancel the delete confirm). */
+@media (hover: hover) {
+  .tx-del:hover { background: var(--neg); color: #fff; opacity: 1; }
+}
 .tx-del:disabled { opacity: 0.3; cursor: default; }
 
 /* Loading / error banner */
@@ -325,6 +329,63 @@ html, body {
 .hero.hero-neg { background: var(--neg); }
 
 /* ---------- Category management (Categories tab) ---------- */
+/* Clickable "Manage categories" bar that opens the popup */
+.manage-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--card-bg);
+  color: var(--text);
+  border: none;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 16px;
+  font: inherit; font-weight: 600;
+  cursor: pointer;
+  margin-bottom: 14px;
+}
+.manage-bar .chev { color: var(--hint); font-size: 20px; line-height: 1; }
+.manage-bar:active { opacity: .8; }
+
+/* Popup / modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(0, 0, 0, .5);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: fadein .15s ease;
+}
+@keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+.modal-sheet {
+  width: 100%;
+  max-width: 520px;
+  background: var(--page-bg);
+  border-radius: 18px 18px 0 0;
+  padding: 18px 16px calc(20px + env(safe-area-inset-bottom));
+  max-height: 80vh;
+  overflow-y: auto;
+  animation: slideup .22s cubic-bezier(.22, 1, .36, 1);
+}
+@keyframes slideup { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 16px; font-weight: 700;
+  margin-bottom: 14px;
+}
+.modal-close {
+  border: none; background: none;
+  color: var(--hint);
+  font-size: 18px; line-height: 1;
+  cursor: pointer;
+  padding: 4px;
+}
+
 .cat-manage { display: flex; gap: 8px; margin-bottom: 12px; }
 .cat-manage input {
   flex: 1 1 auto;
@@ -363,7 +424,7 @@ html, body {
   cursor: pointer;
   padding: 2px;
 }
-.cat-x:hover { color: var(--neg); }
+@media (hover: hover) { .cat-x:hover { color: var(--neg); } }
 
 /* Tappable recurring row (whole card opens the edit form) */
 .tx.tappable { cursor: pointer; }

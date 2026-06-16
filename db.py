@@ -443,6 +443,11 @@ class Store:
             ).fetchone()
         return row["cleared_up_to"] if row else None
 
+    def ping(self):
+        """Trivial query used by /health to keep the (scale-to-zero) DB warm."""
+        with _get_pool().connection() as conn:
+            conn.execute("SELECT 1")
+
     def set_cleared_up_to(self, user_id: int, message_id: int):
         with _get_pool().connection() as conn:
             conn.execute(

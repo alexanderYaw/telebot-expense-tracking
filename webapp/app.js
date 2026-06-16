@@ -684,19 +684,8 @@ function renderCategories() {
       <div class="bar-track"><div class="bar-fill" style="width:${(v / maxCat) * 100}%;background:${catColor(c)}"></div></div>
     </div>`).join('');
 
-  // Manage (add / remove) the user's categories.
-  const tags = STATE.categories.map((c) =>
-    `<span class="cat-tag" style="border-color:${catColor(c)}">${catIcon(c)} ${escapeHtml(c)}<button class="cat-x" data-rmcat="${escapeHtml(c)}" aria-label="Remove">✕</button></span>`
-  ).join('');
-  const manageCard = `
-    <div class="card">
-      <p class="card-title">Manage categories</p>
-      <div class="cat-manage">
-        <input id="new-cat" placeholder="New category" maxlength="24">
-        <button id="add-cat" class="btn-mini">Add</button>
-      </div>
-      <div class="cat-list">${tags || '<span class="sub">No categories yet.</span>'}</div>
-    </div>`;
+  // Manage categories: a clickable bar that opens the edit popup.
+  const manageBar = `<button class="manage-bar" id="manage-cats">Manage categories<span class="chev">›</span></button>`;
 
   $('#view-categories').innerHTML = `
     ${statusBanner()}
@@ -710,16 +699,66 @@ function renderCategories() {
         <p class="card-title">${escapeHtml(STATE.categoryFilter)} · ${money(filtered.reduce((a, r) => a + r.amount, 0))}</p>
         ${filtered.length ? filtered.map(txRow).join('') : emptyInline('Nothing in ' + STATE.categoryFilter)}
       </div>`}
-    ${manageCard}`;
+    ${manageBar}`;
 
   $('#view-categories').querySelectorAll('[data-filter]').forEach((b) =>
     b.addEventListener('click', () => { STATE.categoryFilter = b.dataset.filter; renderCategories(); }));
 
-  const addCat = $('#add-cat');
+  const manageBtn = $('#manage-cats');
+  if (manageBtn) manageBtn.addEventListener('click', openCategoryModal);
+}
+
+// --- Category manage popup ----------------------------------------
+function categoryTagsHtml() {
+  const tags = STATE.categories.map((c) =>
+    `<span class="cat-tag" style="border-color:${catColor(c)}">${catIcon(c)} ${escapeHtml(c)}<button class="cat-x" data-rmcat="${escapeHtml(c)}" aria-label="Remove">✕</button></span>`
+  ).join('');
+  return tags || '<span class="sub">No categories yet.</span>';
+}
+
+function openCategoryModal() {
+  const root = document.createElement('div');
+  root.className = 'modal-overlay';
+  root.innerHTML = `
+    <div class="modal-sheet">
+      <div class="modal-head"><span>Manage categories</span><button class="modal-close" aria-label="Close">✕</button></div>
+      <div class="cat-manage">
+        <input id="new-cat" placeholder="New category" maxlength="24">
+        <button id="add-cat" class="btn-mini">Add</button>
+      </div>
+      <div class="cat-list" id="modal-cat-list">${categoryTagsHtml()}</div>
+    </div>`;
+  document.body.appendChild(root);
+  wireCategoryModal(root);
+  const input = $('#new-cat', root);
+  if (input) input.focus();
+}
+
+function wireCategoryModal(root) {
+  // Close on backdrop tap or the ✕.
+  root.addEventListener('click', (e) => {
+    if (e.target === root || e.target.closest('.modal-close')) closeCategoryModal();
+  });
+  const addCat = $('#add-cat', root);
   if (addCat) addCat.addEventListener('click', onCategoryAdd);
-  const newCat = $('#new-cat');
+  const newCat = $('#new-cat', root);
   if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
-  $('#view-categories').querySelectorAll('[data-rmcat]').forEach((b) =>
+  root.querySelectorAll('[data-rmcat]').forEach((b) =>
+    b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat)));
+}
+
+function closeCategoryModal() {
+  const root = $('.modal-overlay');
+  if (root) root.remove();
+  renderCategories();  // refresh the tab's filter chips behind the popup
+}
+
+// Re-render just the popup's category list (after add/remove) without closing it.
+function refreshCategoryModal() {
+  const list = $('#modal-cat-list');
+  if (!list) return;
+  list.innerHTML = categoryTagsHtml();
+  list.querySelectorAll('[data-rmcat]').forEach((b) =>
     b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat)));
 }
 
@@ -729,8 +768,9 @@ async function onCategoryAdd() {
   if (!name) { toast('⚠️ Enter a category name'); return; }
   try {
     STATE.categories = await API.categoryAdd(name);
+    if (input) input.value = '';
     haptic('success');
-    renderCategories();
+    refreshCategoryModal();
   } catch (e) {
     haptic('error');
     toast('⚠️ ' + (e.message || 'Could not add'));
@@ -747,7 +787,7 @@ async function onCategoryRemove(name) {
     if (STATE.categoryFilter === name) STATE.categoryFilter = 'All';
     if (STATE.addCategory === name) STATE.addCategory = STATE.categories[0] || '';
     haptic('success');
-    renderCategories();
+    refreshCategoryModal();
   } catch (e) {
     haptic('error');
     toast('⚠️ ' + (e.message || 'Could not remove'));
@@ -884,8 +924,8 @@ $('#app').addEventListener('click', async (e) => {
   const ok = (tg && tg.showConfirm)
     ? await new Promise((res) => tg.showConfirm('Delete this entry?', res))
     : window.confirm('Delete this entry?');
-  // Cancelled → repaint the current view so the row returns to its normal state.
-  if (!ok) { RENDERERS[STATE.activeTab](); return; }
+  // Cancelled → drop focus so the button doesn't keep any active/hover styling.
+  if (!ok) { del.blur(); return; }
   del.disabled = true;
   try {
     await API.remove(id, month);
