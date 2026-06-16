@@ -788,15 +788,32 @@ async def clear_chat_messages(chat_id: int) -> int:
     return deleted
 
 
-@app.post("/tasks/clear")
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+async def _run_clear_sweep():
+    # Sweep every (non-banned) registered user — in private chats chat_id == user_id.
+    # Deleting messages is one-at-a-time and rate-limited, so a first run (or a long
+    # gap) can take minutes — far longer than a cron's HTTP timeout. We run it as a
+    # background task so the endpoint can ack immediately; results go to the log.
+    cleared = {str(uid): await clear_chat_messages(uid) for uid in store.all_user_ids()}
+    logging.info("clear sweep done: %s", cleared)
+
+
+@app.post("/tasks/clear", status_code=202)
 async def api_clear(x_task_token: str = Header(default="")):
     # Guarded by a shared secret so only the cron job can trigger it. If the token
     # env var is unset the endpoint is disabled (always 403) rather than open.
     if not CLEAR_TASK_TOKEN or not hmac.compare_digest(x_task_token, CLEAR_TASK_TOKEN):
         raise HTTPException(status_code=403, detail="Forbidden")
-    # Sweep every (non-banned) registered user — in private chats chat_id == user_id.
-    cleared = {str(uid): await clear_chat_messages(uid) for uid in store.all_user_ids()}
-    return {"cleared": cleared}
+    # Fire-and-forget: kick off the sweep and return at once so the cron sees a fast
+    # 202 instead of timing out while we churn through deletes. Keep a reference in a
+    # module-level set so the task isn't garbage-collected mid-run (a known asyncio
+    # gotcha), discarding it once done.
+    task = asyncio.create_task(_run_clear_sweep())
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return {"status": "accepted"}
 
 
 @app.get("/health")
