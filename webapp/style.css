@@ -107,15 +107,15 @@ html, body {
 /* Grey "Spent" summary card on Home (demoted from the orange hero) */
 .amount-lg { font-size: 32px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 6px; }
 .sub-muted { font-size: 15px; font-weight: 500; color: var(--hint); }
-.sub-muted.pos { color: #1abb35; font-weight: 700; }
-.sub-muted.neg { color: #c30e0e; font-weight: 700; }
+.sub-muted .pos { color: var(--pos); font-weight: 700; }
+.sub-muted .neg { color: var(--neg); font-weight: 700; }
 
 /* Blue budget hero on Home: "left to spend" sits inline with the amount */
 .hero.hero-budget { background: #3b82f6; color: #fff; }
 .hero.hero-budget .card-title { color: #fff; opacity: .85; }
 /* Overspent: only the "over budget" label goes red; the number stays white. */
-.hero.hero-budget .budget-state.is-over { color: #c30e0e; }
-.hero.hero-budget .budget-state.is-under { color: #1abb35; }
+.hero.hero-budget .budget-state.is-over { color: #ff4c4c; }
+.hero.hero-budget .budget-state.is-under { color: #28f44a; }
 .budget-amount-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .budget-amount-label { font-size: 14px; font-weight: 600; opacity: .9; }
 

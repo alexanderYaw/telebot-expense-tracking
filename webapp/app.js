@@ -371,7 +371,7 @@ function renderHome() {
     <div class="card">
       <p class="card-title">Expenditure in ${monthLabel(STATE.month)}</p>
       <div class="amount-lg">${money(t.spent)}</div>
-      <div class="sub-muted ${t.net >= 0 ? 'pos' : 'neg'}">Net ${t.net >= 0 ? '+' : '−'}${money(Math.abs(t.net))} this month</div>
+      <div class="sub-muted">Net ${t.net >= 0 ? '+' : '−'}<span class="${t.net >= 0 ? 'pos' : 'neg'}">${money(Math.abs(t.net))}</span> this month</div>
     </div>
 
     <div class="stat-row">
