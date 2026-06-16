@@ -93,9 +93,14 @@ SCHEMA = [
         user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
         name    TEXT NOT NULL,
         seq     BIGSERIAL,
+        icon    TEXT NOT NULL DEFAULT '',   -- user-chosen emoji ('' = fall back to a default)
+        color   TEXT NOT NULL DEFAULT '',   -- user-chosen hex   ('' = fall back to a default)
         PRIMARY KEY (user_id, name)
     )
     """,
+    # Migrate tables created before icon/color existed.
+    "ALTER TABLE categories ADD COLUMN IF NOT EXISTS icon TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE categories ADD COLUMN IF NOT EXISTS color TEXT NOT NULL DEFAULT ''",
 ]
 
 
@@ -311,32 +316,43 @@ class Store:
         return [_tx(r) for r in rows]
 
     # --- categories (per user, editable) ----------------------------
-    def get_categories(self, user_id: int) -> list[str]:
-        """The user's categories in order. Lazily seeds DEFAULT_CATEGORIES the first
-        time (user row must already exist — callers ensure_user first)."""
-        with _get_pool().connection() as conn:
-            rows = conn.execute(
-                "SELECT name FROM categories WHERE user_id = %s ORDER BY seq", (user_id,)
-            ).fetchall()
-            if not rows:
-                with conn.cursor() as cur:
-                    cur.executemany(
-                        "INSERT INTO categories (user_id, name) VALUES (%s, %s) "
-                        "ON CONFLICT DO NOTHING",
-                        [(user_id, c) for c in DEFAULT_CATEGORIES],
-                    )
-                rows = conn.execute(
-                    "SELECT name FROM categories WHERE user_id = %s ORDER BY seq", (user_id,)
-                ).fetchall()
-        return [r["name"] for r in rows]
+    def _ensure_categories(self, conn, user_id: int):
+        """Return (name, icon, color) rows in order, lazily seeding DEFAULT_CATEGORIES
+        the first time (user row must already exist — callers ensure_user first)."""
+        sql = "SELECT name, icon, color FROM categories WHERE user_id = %s ORDER BY seq"
+        rows = conn.execute(sql, (user_id,)).fetchall()
+        if not rows:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO categories (user_id, name) VALUES (%s, %s) "
+                    "ON CONFLICT DO NOTHING",
+                    [(user_id, c) for c in DEFAULT_CATEGORIES],
+                )
+            rows = conn.execute(sql, (user_id,)).fetchall()
+        return rows
 
-    def add_category(self, user_id: int, name: str) -> bool:
-        """Add a category. Returns False if it already existed."""
+    def get_categories(self, user_id: int) -> list[str]:
+        """The user's category names in order (used by the bot's button grid)."""
+        with _get_pool().connection() as conn:
+            return [r["name"] for r in self._ensure_categories(conn, user_id)]
+
+    def get_categories_full(self, user_id: int) -> list[dict]:
+        """The user's categories as {name, icon, color} in order (for the webapp).
+        icon/color are '' when unset — the client falls back to its own defaults."""
+        with _get_pool().connection() as conn:
+            return [
+                {"name": r["name"], "icon": r["icon"] or "", "color": r["color"] or ""}
+                for r in self._ensure_categories(conn, user_id)
+            ]
+
+    def add_category(self, user_id: int, name: str, icon: str = "", color: str = "") -> bool:
+        """Add a category with an optional emoji icon and hex colour. Returns False
+        if it already existed."""
         with _get_pool().connection() as conn:
             row = conn.execute(
-                "INSERT INTO categories (user_id, name) VALUES (%s, %s) "
+                "INSERT INTO categories (user_id, name, icon, color) VALUES (%s, %s, %s, %s) "
                 "ON CONFLICT DO NOTHING RETURNING name",
-                (user_id, name),
+                (user_id, name, icon, color),
             ).fetchone()
         return row is not None
 

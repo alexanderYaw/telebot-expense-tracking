@@ -89,6 +89,27 @@ def clean_category(name):
         raise ValueError("category must be 1–24 characters and not contain '|'")
     return name
 
+_HEX_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
+
+def clean_category_icon(icon):
+    """A short emoji to represent a category; '' means 'use a default'. Capped well
+    above a single emoji (family/flag sequences are several code units) but not free
+    text. Display-only, so no other constraints beyond length / no newlines."""
+    icon = (icon or "").strip()
+    if "\n" in icon or len(icon) > 16:
+        raise ValueError("icon must be a single emoji")
+    return icon
+
+def clean_category_color(color):
+    """A 6-digit hex colour like '#1faa6c', normalised with a leading '#'. '' means
+    'use a default'."""
+    color = (color or "").strip()
+    if not color:
+        return ""
+    if not _HEX_COLOR_RE.match(color):
+        raise ValueError("color must be a 6-digit hex like #1faa6c")
+    return color if color.startswith("#") else "#" + color
+
 # --- TELEGRAM HANDLERS ---
 
 # Conversation states for the add-expense flow
@@ -608,7 +629,7 @@ def api_list(month: str, user_id: int = Depends(require_auth)):
     _require_month(month)
     return {
         "transactions": store.get_month(user_id, month),
-        "categories": store.get_categories(user_id),
+        "categories": store.get_categories_full(user_id),
     }
 
 
@@ -678,27 +699,31 @@ def api_recurring(user_id: int = Depends(require_auth)):
 
 @app.get("/api/categories")
 def api_categories(user_id: int = Depends(require_auth)):
-    return {"categories": store.get_categories(user_id)}
+    return {"categories": store.get_categories_full(user_id)}
 
 
 class CategoryIn(BaseModel):
     name: str
+    icon: str | None = None
+    color: str | None = None
 
 
 @app.post("/api/categories")
 def api_category_add(c: CategoryIn, user_id: int = Depends(require_auth)):
     try:
         name = clean_category(c.name)
+        icon = clean_category_icon(c.icon)
+        color = clean_category_color(c.color)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    store.add_category(user_id, name)
-    return {"categories": store.get_categories(user_id)}
+    store.add_category(user_id, name, icon=icon, color=color)
+    return {"categories": store.get_categories_full(user_id)}
 
 
 @app.delete("/api/categories/{name}")
 def api_category_remove(name: str, user_id: int = Depends(require_auth)):
     store.remove_category(user_id, name)
-    return {"categories": store.get_categories(user_id)}
+    return {"categories": store.get_categories_full(user_id)}
 
 
 class BudgetIn(BaseModel):
@@ -742,7 +767,7 @@ def api_home(month: str, user_id: int = Depends(require_auth)):
     return {
         "transactions": store.get_month(user_id, month),
         "recurring": store.recurring_transactions(user_id),
-        "categories": store.get_categories(user_id),
+        "categories": store.get_categories_full(user_id),
         "budget": store.budget_summary(user_id, month),
     }
 

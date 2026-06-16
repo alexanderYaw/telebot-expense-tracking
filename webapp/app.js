@@ -49,8 +49,14 @@ const CAT_STYLE = {
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
   '#eab308', '#06b6d4', '#f43f5e', '#84cc16', '#6366f1', '#d946ef'];
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
-const catColor = (c) => (CAT_STYLE[c] && CAT_STYLE[c].color) || CAT_PALETTE[hashStr(String(c)) % CAT_PALETTE.length];
-const catIcon  = (c) => (CAT_STYLE[c] && CAT_STYLE[c].icon) || '•';
+// Resolution order: the user's chosen icon/colour for the category (from /api) →
+// a hand-picked style for known default names → a deterministic palette colour and
+// a generic icon. STATE.categoryMeta is populated whenever categories are loaded.
+const catColor = (c) => (STATE.categoryMeta[c] && STATE.categoryMeta[c].color)
+  || (CAT_STYLE[c] && CAT_STYLE[c].color)
+  || CAT_PALETTE[hashStr(String(c)) % CAT_PALETTE.length];
+const catIcon = (c) => (STATE.categoryMeta[c] && STATE.categoryMeta[c].icon)
+  || (CAT_STYLE[c] && CAT_STYLE[c].icon) || '•';
 
 // --- App state ----------------------------------------------------
 // Each tx: {id, date 'YYYY-MM-DD', type, category, amount, name, recurring}
@@ -66,6 +72,7 @@ const STATE = {
   budget: null,                   // last-fetched budget summary (see API.budgetGet)
   budgetMonth: null,              // the month STATE.budget was computed for
   categories: [],                 // user's category names (from /api)
+  categoryMeta: {},               // name -> {icon, color} chosen by the user (from /api)
   recurring: null,                // active recurring txs for the Recurring section (null = unloaded)
   editingId: null,                // id of the recurring tx being edited (else null)
   editingTx: null,                // the recurring tx object being edited (for prefill)
@@ -126,9 +133,10 @@ const API = {
     if (!r.ok) throw new Error(`Load failed (${r.status})`);
     return (await r.json()).categories;
   },
-  async categoryAdd(name) {
+  async categoryAdd(name, icon, color) {
     const r = await fetch('/api/categories', {
-      method: 'POST', headers: this.headers(), body: JSON.stringify({ name }),
+      method: 'POST', headers: this.headers(),
+      body: JSON.stringify({ name, icon: icon || '', color: color || '' }),
     });
     if (!r.ok) throw new Error(await detail(r) || `Add failed (${r.status})`);
     return (await r.json()).categories;
@@ -189,6 +197,17 @@ async function detail(r) {
 // savings — force the next ensureBudget to refetch.
 function invalidateBudget() { STATE.budgetMonth = null; }
 
+// Store the category list from /api: names (for the rest of the app) plus a
+// name -> {icon, color} map for catColor/catIcon. Accepts the new object form and,
+// defensively, a plain-string form.
+function setCategories(list) {
+  const arr = (list || []).map((c) => (typeof c === 'string' ? { name: c } : c));
+  STATE.categories = arr.map((c) => c.name);
+  STATE.categoryMeta = {};
+  for (const c of arr) STATE.categoryMeta[c.name] = { icon: c.icon || '', color: c.color || '' };
+  if (!STATE.categories.includes(STATE.addCategory)) STATE.addCategory = STATE.categories[0] || '';
+}
+
 // Load the active recurring transactions for the Recurring section.
 async function ensureRecurring({ force = false } = {}) {
   if (!force && STATE.recurring) return;
@@ -223,8 +242,7 @@ async function ensureHome(ym, { force = false } = {}) {
     const d = await API.home(ym);
     STATE.cache[ym] = d.transactions;
     STATE.recurring = d.recurring;
-    STATE.categories = d.categories;
-    if (!STATE.categories.includes(STATE.addCategory)) STATE.addCategory = STATE.categories[0] || '';
+    setCategories(d.categories);
     STATE.budget = d.budget;
     STATE.budgetMonth = ym;
   } catch (e) {
@@ -760,9 +778,15 @@ function openCategoryModal() {
   root.innerHTML = `
     <div class="modal-sheet">
       <div class="modal-head"><span>Manage categories</span><button class="modal-close" aria-label="Close">✕</button></div>
-      <div class="cat-manage">
-        <input id="new-cat" placeholder="New category" maxlength="24">
-        <button id="add-cat" class="btn-mini">Add</button>
+      <div class="cat-create">
+        <div class="cat-create-top">
+          <input id="new-cat-icon" class="emoji-input" placeholder="🙂" maxlength="8" inputmode="text" aria-label="Emoji">
+          <input id="new-cat" placeholder="New category" maxlength="24">
+        </div>
+        <div class="swatches" id="cat-swatches">${CAT_PALETTE.map((col, i) =>
+          `<button class="swatch${i === 0 ? ' is-active' : ''}" data-color="${col}" style="background:${col}" aria-label="Colour"></button>`
+        ).join('')}</div>
+        <button id="add-cat" class="btn-mini btn-block">Add category</button>
       </div>
       <div class="cat-list" id="modal-cat-list">${categoryTagsHtml()}</div>
     </div>`;
@@ -781,6 +805,12 @@ function wireCategoryModal(root) {
   if (addCat) addCat.addEventListener('click', onCategoryAdd);
   const newCat = $('#new-cat', root);
   if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
+  // Colour swatches: tapping one selects it (single active swatch).
+  root.querySelectorAll('#cat-swatches .swatch').forEach((s) =>
+    s.addEventListener('click', () => {
+      root.querySelectorAll('#cat-swatches .swatch').forEach((x) => x.classList.remove('is-active'));
+      s.classList.add('is-active');
+    }));
   root.querySelectorAll('[data-rmcat]').forEach((b) =>
     b.addEventListener('click', () => onCategoryRemove(b.dataset.rmcat, b)));
 }
@@ -801,12 +831,18 @@ function refreshCategoryModal() {
 }
 
 async function onCategoryAdd() {
-  const input = $('#new-cat');
-  const name = (input && input.value || '').trim();
+  const root = $('.modal-overlay');
+  const nameEl = $('#new-cat', root);
+  const name = ((nameEl && nameEl.value) || '').trim();
   if (!name) { toast('⚠️ Enter a category name'); return; }
+  const iconEl = $('#new-cat-icon', root);
+  const icon = ((iconEl && iconEl.value) || '').trim();
+  const sw = $('#cat-swatches .swatch.is-active', root);
+  const color = sw ? sw.dataset.color : '';
   try {
-    STATE.categories = await API.categoryAdd(name);
-    if (input) input.value = '';
+    setCategories(await API.categoryAdd(name, icon, color));
+    if (nameEl) nameEl.value = '';
+    if (iconEl) iconEl.value = '';
     haptic('success');
     refreshCategoryModal();
   } catch (e) {
@@ -822,9 +858,8 @@ async function onCategoryRemove(name, btn) {
   // Cancelled → clear the stuck hover highlight on the ✕ without re-rendering.
   if (!ok) { clearHover(btn); return; }
   try {
-    STATE.categories = await API.categoryRemove(name);
+    setCategories(await API.categoryRemove(name));
     if (STATE.categoryFilter === name) STATE.categoryFilter = 'All';
-    if (STATE.addCategory === name) STATE.addCategory = STATE.categories[0] || '';
     haptic('success');
     refreshCategoryModal();
   } catch (e) {
