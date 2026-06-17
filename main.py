@@ -64,6 +64,55 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 # Postgres-backed per-user store (system of record).
 store = Store()
 
+# --- USER ID ENCRYPTION ------------------------------------------------------
+# We never persist a raw Telegram user/chat id. Each id is run through a keyed,
+# reversible cipher and the resulting token is what the DB stores (as the tenant
+# key, FKs and clear bookmark). It must be reversible because in a private chat the
+# user_id *is* the chat_id, and the nightly clear has to recover it to message the
+# user. This is a small balanced Feistel network over a 62-bit domain (two 31-bit
+# halves) with HMAC-SHA256 as the round function — no external crypto dependency.
+#
+# The key comes from USER_ID_SECRET. In production (hosted, WEBHOOK_URL set) it is
+# REQUIRED — we refuse to silently fall back to the bot token, because if the key ever
+# changes (you set USER_ID_SECRET later, or rotate the token) every stored token
+# becomes undecodable and all rows are orphaned. Locally it falls back to the token
+# for convenience. CHANGING THE KEY ORPHANS ALL EXISTING ROWS — keep it stable.
+_USER_ID_SECRET = os.getenv("USER_ID_SECRET")
+if not _USER_ID_SECRET:
+    if WEBHOOK_URL:
+        raise RuntimeError(
+            "USER_ID_SECRET must be set in production: it keys the reversible user-id "
+            "encryption, and changing it later orphans every stored row. Set a dedicated, "
+            "stable secret (do not rely on the bot token)."
+        )
+    _USER_ID_SECRET = TELEGRAM_TOKEN  # local dev convenience only
+_ID_KEY = hashlib.sha256(_USER_ID_SECRET.encode()).digest()
+_ID_HALF = 31
+_ID_HALF_MASK = (1 << _ID_HALF) - 1
+_ID_ROUNDS = 4
+
+def _id_round(i: int, x: int) -> int:
+    digest = hmac.new(_ID_KEY, bytes([i]) + x.to_bytes(4, "big"), hashlib.sha256).digest()
+    return int.from_bytes(digest[:4], "big") & _ID_HALF_MASK
+
+def encode_id(real_id: int) -> int:
+    """Map a real Telegram id to its reversible storage token. Deterministic, so the
+    same user always resolves to the same row. Telegram ids are < 2^52, well inside
+    the 62-bit domain; the token is a non-negative int that fits a signed BIGINT."""
+    n = int(real_id)
+    left, right = (n >> _ID_HALF) & _ID_HALF_MASK, n & _ID_HALF_MASK
+    for i in range(_ID_ROUNDS):
+        left, right = right, left ^ _id_round(i, right)
+    return (left << _ID_HALF) | right
+
+def decode_id(token: int) -> int:
+    """Inverse of encode_id: recover the real Telegram id (= chat_id) from a token."""
+    n = int(token)
+    left, right = (n >> _ID_HALF) & _ID_HALF_MASK, n & _ID_HALF_MASK
+    for i in reversed(range(_ID_ROUNDS)):
+        left, right = right ^ _id_round(i, left), left
+    return (left << _ID_HALF) | right
+
 # Money validation shared by the bot, the /api transaction route and the budget
 # endpoints. The store columns are NUMERIC(12,2), so a value must be finite,
 # positive and within range; centralising this keeps a bad number a clean 400 /
@@ -135,8 +184,10 @@ def _gate(update) -> int | None:
     u = update.effective_user
     if u is None:
         return None
-    username = u.username or u.full_name
-    return None if store.ensure_user(u.id, username) else u.id
+    # Store/return the encrypted token, never the raw id. The token is the tenant key
+    # everywhere; message-sending uses update.effective_chat.id (the real id) directly.
+    tok = encode_id(u.id)
+    return None if store.ensure_user(tok) else tok
 
 
 def _is_admin(update) -> bool:
@@ -179,7 +230,7 @@ async def receive_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Build the button grid dynamically from this user's categories
     keyboard = []
     row = []
-    for cat in store.get_categories(update.effective_user.id):
+    for cat in store.get_categories(encode_id(update.effective_user.id)):
         # Only the category travels in the callback_data; name/amount live in user_data
         callback_data = f"setcat|{cat}"
         row.append(InlineKeyboardButton(cat, callback_data=callback_data))
@@ -212,7 +263,7 @@ async def receive_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Save to Postgres for this user. Expenses added via the bot always count
     # toward the budget (no exclude option — that's webapp-only).
-    store.add_transaction(update.effective_user.id, "Expense", amount, name=name, category=category)
+    store.add_transaction(encode_id(update.effective_user.id), "Expense", amount, name=name, category=category)
 
     # Replace the button grid with a success message
     await query.edit_message_text(f"✅ Logged: {name} — ${amount:.2f} for {category}")
@@ -415,8 +466,9 @@ async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("❌ Syntax: /ban [user_id]")
+        await update.message.reply_text("❌ Syntax: /ban [id from /stats]")
         return
+    # `target` is the stored token shown by /stats (not the raw Telegram id).
     ok = store.set_banned(target, True)
     await update.message.reply_text(
         f"🚫 Banned user {target}." if ok else f"⚠️ No user {target} found."
@@ -428,8 +480,9 @@ async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(context.args[0])
     except (IndexError, ValueError):
-        await update.message.reply_text("❌ Syntax: /unban [user_id]")
+        await update.message.reply_text("❌ Syntax: /unban [id from /stats]")
         return
+    # `target` is the stored token shown by /stats (not the raw Telegram id).
     ok = store.set_banned(target, False)
     await update.message.reply_text(
         f"✅ Unbanned user {target}." if ok else f"⚠️ No user {target} found."
@@ -447,8 +500,8 @@ async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     for u in s["per_user"]:
         tag = " 🚫" if u["banned"] else ""
-        handle = escape_markdown(str(u["username"] or u["user_id"]), version=1)
-        lines.append(f"`{u['user_id']}` {handle}{tag}: {u['tx_count']}")
+        # Show the stored token, never the real Telegram id. /ban takes this value.
+        lines.append(f"`{u['user_id']}`{tag}: {u['tx_count']}")
     await _reply_chunked(update.message, "\n".join(lines), parse_mode='Markdown')
 
 # --- TELEGRAM APPLICATION ---
@@ -551,14 +604,16 @@ async def require_auth(x_telegram_init_data: str = Header(default="")) -> int:
     a valid signature is all that's required (no allowlist); the user is provisioned
     on first call. 401 on a bad/missing signature, 403 if the user is banned."""
     if DEV_MODE:
-        user_id = DEV_USER_ID
+        real_id = DEV_USER_ID
     else:
         auth = validate_init_data(x_telegram_init_data)
         if auth is None:
             raise HTTPException(status_code=401, detail="Unauthorized")
-        user_id = _init_data_user_id(auth)
-        if user_id is None:
+        real_id = _init_data_user_id(auth)
+        if real_id is None:
             raise HTTPException(status_code=401, detail="Unauthorized")
+    # The encrypted token is the tenant key used by every /api store call.
+    user_id = encode_id(real_id)
     if store.ensure_user(user_id):  # returns True if banned
         raise HTTPException(status_code=403, detail="Banned")
     return user_id
@@ -806,15 +861,19 @@ CLEAR_TASK_TOKEN = os.getenv("CLEAR_TASK_TOKEN")
 FIRST_RUN_LOOKBACK = 500
 
 
-async def clear_chat_messages(chat_id: int) -> int:
+async def clear_chat_messages(user_token: int) -> int:
     """Delete recent messages in a private chat. Sends a silent probe to learn the
     newest message_id, posts a permanent "cleared" message (so the chat is never left
     empty — Telegram auto-unpins chats with 0 messages), then deletes from the
     last-cleared bookmark up to the probe. The keeper survives this run and is removed
     by the next one.
 
+    Takes the user's stored token; the real chat_id (needed to message Telegram) is
+    decoded from it. The clear bookmark stays keyed by the token (FK to users).
+
     Returns the number deleted, or -1 if skipped because the user is mid add-expense
     flow (so we don't wipe a live prompt / inline keyboard and strand them)."""
+    chat_id = decode_id(user_token)   # real Telegram chat id for sends/deletes
     started = ACTIVE_FLOWS.get(chat_id)
     if started is not None and (time.time() - started) < FLOW_GRACE_SECONDS:
         logging.info("clear: skipping chat %s — add-expense flow in progress", chat_id)
@@ -841,9 +900,9 @@ async def clear_chat_messages(chat_id: int) -> int:
         logging.warning("clear: could not post keeper for chat %s, skipping: %s", chat_id, e)
         return 0
 
-    # In a private chat the chat_id equals the user_id, so the clear bookmark is
-    # keyed on the same id the store uses everywhere else.
-    cleared_up_to = store.get_cleared_up_to(chat_id)
+    # The clear bookmark is keyed by the user's stored token (FK to users), not the
+    # raw chat_id.
+    cleared_up_to = store.get_cleared_up_to(user_token)
     start = (cleared_up_to + 1) if cleared_up_to else max(1, newest - FIRST_RUN_LOOKBACK)
 
     deleted = 0
@@ -860,7 +919,7 @@ async def clear_chat_messages(chat_id: int) -> int:
                 pass
         except TelegramError:
             pass  # too old (>48h), already gone, or undeletable — skip it
-    store.set_cleared_up_to(chat_id, newest)
+    store.set_cleared_up_to(user_token, newest)
     return deleted
 
 
