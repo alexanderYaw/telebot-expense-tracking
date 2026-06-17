@@ -18,6 +18,11 @@ from psycopg_pool import ConnectionPool
 # list is fully user-editable (add/remove) and stored per user.
 DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Others"]
 
+# Fixed 64-bit key for the user-id encryption migration's advisory lock (serialises
+# concurrent runners so two instances can't re-key at once). Arbitrary but stable;
+# positive so it fits a signed bigint.
+_MIGRATION_LOCK_KEY = 0x7569645F656E6331  # "uid_enc1"
+
 # Neon/Supabase connection strings already carry `sslmode=require`.
 _pool: ConnectionPool | None = None
 
@@ -152,37 +157,35 @@ class Store:
             row = conn.execute("SELECT value FROM meta WHERE key = %s", (key,)).fetchone()
         return row["value"] if row else None
 
-    def meta_set(self, key: str, value: str):
-        with _get_pool().connection() as conn:
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (%s, %s) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                (key, value),
-            )
-
-    def rekey_user_ids(self, mapping: list[tuple[int, int]]):
+    def rekey_user_ids(self, mapping: list[tuple[int, int]]) -> bool:
         """One-time migration: rewrite every table's user_id from the old (raw) id to
-        the new (encrypted) token. `mapping` is [(old, new), ...]. The child FKs are
-        ON UPDATE CASCADE, so updating users.user_id propagates to all child rows.
-        Done in two passes through a temporary negative space so a new token can never
-        collide with an as-yet-unmigrated (positive) id. All in one transaction."""
-        if not mapping:
-            return
-        # (table, constraint_name) for every FK onto users.user_id. Postgres' default
-        # constraint name is <table>_<column>_fkey.
-        child_fks = [
-            ("transactions", "transactions_user_id_fkey"),
-            ("budgets", "budgets_user_id_fkey"),
-            ("clear_state", "clear_state_user_id_fkey"),
-            ("categories", "categories_user_id_fkey"),
-        ]
+        the new (encrypted) token. `mapping` is [(old, new), ...]. Everything happens
+        in ONE transaction under a Postgres advisory lock:
+          - the lock serialises concurrent runners (safe across multiple instances);
+          - we re-check the migration flag under the lock and skip if already done;
+          - every FK onto users(user_id) is recreated ON UPDATE CASCADE, found by its
+            actual catalog name (not an assumed default), so the re-key propagates;
+          - users.user_id is re-keyed in two passes through a temporary negative space
+            so a new token can never collide with an as-yet-unmigrated positive id;
+          - the completion flag is set in the SAME transaction, so a crash rolls back
+            the re-key and the flag together (no double-encryption on retry).
+        Returns True if it performed the migration, False if it was already done."""
         with _get_pool().connection() as conn, conn.transaction():
-            # Ensure the child FKs cascade updates (older DBs were created with only
-            # ON DELETE CASCADE), so re-keying users.user_id propagates. Idempotent.
-            for table, name in child_fks:
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (_MIGRATION_LOCK_KEY,))
+            if conn.execute(
+                "SELECT 1 FROM meta WHERE key = 'uid_encrypted' AND value = '1'"
+            ).fetchone():
+                return False
+            # Recreate every FK pointing at users(user_id) — whatever it's named — with
+            # ON UPDATE CASCADE, so re-keying users.user_id cascades to the children.
+            fks = conn.execute(
+                "SELECT conrelid::regclass::text AS tbl, conname "
+                "FROM pg_constraint WHERE confrelid = 'users'::regclass AND contype = 'f'"
+            ).fetchall()
+            for fk in fks:
                 conn.execute(
-                    f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}, "
-                    f"ADD CONSTRAINT {name} FOREIGN KEY (user_id) "
+                    f'ALTER TABLE {fk["tbl"]} DROP CONSTRAINT "{fk["conname"]}", '
+                    f'ADD CONSTRAINT "{fk["conname"]}" FOREIGN KEY (user_id) '
                     f"REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE"
                 )
             # Pass 1: old (positive) -> unique temporary negative (-token - 1).
@@ -191,6 +194,12 @@ class Store:
             # Pass 2: temporary negative -> final token (positive).
             for old, new in mapping:
                 conn.execute("UPDATE users SET user_id = %s WHERE user_id = %s", (new, -new - 1))
+            # Record completion atomically with the re-key.
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES ('uid_encrypted', '1') "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+            )
+        return True
 
     # --- users -------------------------------------------------------
     def ensure_user(self, user_id: int) -> bool:

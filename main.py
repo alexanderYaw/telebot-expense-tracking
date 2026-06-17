@@ -72,9 +72,21 @@ store = Store()
 # user. This is a small balanced Feistel network over a 62-bit domain (two 31-bit
 # halves) with HMAC-SHA256 as the round function — no external crypto dependency.
 #
-# The key comes from USER_ID_SECRET (falls back to the bot token so it works without
-# extra config). CHANGING THE KEY ORPHANS ALL EXISTING ROWS — keep it stable.
-_ID_KEY = hashlib.sha256((os.getenv("USER_ID_SECRET") or TELEGRAM_TOKEN).encode()).digest()
+# The key comes from USER_ID_SECRET. In production (hosted, WEBHOOK_URL set) it is
+# REQUIRED — we refuse to silently fall back to the bot token, because if the key ever
+# changes (you set USER_ID_SECRET later, or rotate the token) every stored token
+# becomes undecodable and all rows are orphaned. Locally it falls back to the token
+# for convenience. CHANGING THE KEY ORPHANS ALL EXISTING ROWS — keep it stable.
+_USER_ID_SECRET = os.getenv("USER_ID_SECRET")
+if not _USER_ID_SECRET:
+    if WEBHOOK_URL:
+        raise RuntimeError(
+            "USER_ID_SECRET must be set in production: it keys the reversible user-id "
+            "encryption, and changing it later orphans every stored row. Set a dedicated, "
+            "stable secret (do not rely on the bot token)."
+        )
+    _USER_ID_SECRET = TELEGRAM_TOKEN  # local dev convenience only
+_ID_KEY = hashlib.sha256(_USER_ID_SECRET.encode()).digest()
 _ID_HALF = 31
 _ID_HALF_MASK = (1 << _ID_HALF) - 1
 _ID_ROUNDS = 4
@@ -103,15 +115,15 @@ def decode_id(token: int) -> int:
 
 def migrate_encrypt_user_ids():
     """One-time: re-key any pre-existing rows from raw Telegram ids to encrypted
-    tokens. Gated by a meta flag so it runs once; new rows are already stored
-    encrypted by the entry points. Atomic (the store does the re-key in one
-    transaction); the flag is only set after it succeeds, so a failure retries."""
-    if store.meta_get("uid_encrypted") == "1":
+    tokens. New rows are already stored encrypted by the entry points. Safe to run on
+    every boot and across multiple instances: the store does the whole thing in one
+    transaction under an advisory lock, re-checking the flag, so it runs exactly once
+    and a crash can never leave the data re-keyed but the flag unset."""
+    if store.meta_get("uid_encrypted") == "1":   # fast path, avoids the lock
         return
     mapping = [(rid, encode_id(rid)) for rid in store.all_user_ids(include_banned=True)]
-    store.rekey_user_ids(mapping)
-    store.meta_set("uid_encrypted", "1")
-    logging.info("Encrypted %d existing user id(s).", len(mapping))
+    if store.rekey_user_ids(mapping):
+        logging.info("Encrypted %d existing user id(s).", len(mapping))
 
 # Money validation shared by the bot, the /api transaction route and the budget
 # endpoints. The store columns are NUMERIC(12,2), so a value must be finite,
