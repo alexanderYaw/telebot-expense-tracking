@@ -113,18 +113,6 @@ def decode_id(token: int) -> int:
         left, right = right ^ _id_round(i, left), left
     return (left << _ID_HALF) | right
 
-def migrate_encrypt_user_ids():
-    """One-time: re-key any pre-existing rows from raw Telegram ids to encrypted
-    tokens. New rows are already stored encrypted by the entry points. Safe to run on
-    every boot and across multiple instances: the store does the whole thing in one
-    transaction under an advisory lock, re-checking the flag, so it runs exactly once
-    and a crash can never leave the data re-keyed but the flag unset."""
-    if store.meta_get("uid_encrypted") == "1":   # fast path, avoids the lock
-        return
-    mapping = [(rid, encode_id(rid)) for rid in store.all_user_ids(include_banned=True)]
-    if store.rekey_user_ids(mapping):
-        logging.info("Encrypted %d existing user id(s).", len(mapping))
-
 # Money validation shared by the bot, the /api transaction route and the budget
 # endpoints. The store columns are NUMERIC(12,2), so a value must be finite,
 # positive and within range; centralising this keeps a bad number a clean 400 /
@@ -676,7 +664,6 @@ class TxIn(BaseModel):
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     init_schema()  # create Postgres tables/indexes if needed
-    migrate_encrypt_user_ids()  # one-time: encrypt any pre-existing raw user ids
     await application.initialize()
     await application.start()
     if WEBHOOK_URL:
