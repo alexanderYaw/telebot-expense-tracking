@@ -251,7 +251,7 @@ HELP_TEXT = (
     "👋 *Welcome!* Expense tracking with zero friction.\n\n"
     "💵 *Log in seconds* — just send an amount like `12.50` and follow the prompts. "
     "No commands to remember.\n\n"
-    "Open the app (menu button) for everything else:\n\n"
+    "Open the app (Expenses button) for everything else:\n\n"
     "🔁 *Recurring expenses* — add a fixed monthly cost once; it's tracked for you every month.\n\n"
     "🎯 *Budgeting* — set a monthly budget and see what's left to spend at a glance.\n\n"
     "🚫 *Exclude from budget* — keep big one-off purchases out of your budget while still logging them.\n\n"

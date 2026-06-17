@@ -483,6 +483,19 @@ html, body {
   border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom);
 }
+
+/* Version label: fixed just above the tab bar, bottom-right, on every screen. */
+.version {
+  position: absolute;
+  right: 12px;
+  bottom: calc(62px + env(safe-area-inset-bottom));
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--hint);
+  opacity: .55;
+  pointer-events: none;
+  z-index: 40;
+}
 .tab {
   flex: 1;
   border: none; background: none;

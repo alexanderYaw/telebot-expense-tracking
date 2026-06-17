@@ -8,7 +8,7 @@
        so this prototype still works standalone for design review. -->
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <!-- ?v= busts the Telegram/browser cache on each asset change. Bump on deploy. -->
-  <link rel="stylesheet" href="style.css?v=3" />
+  <link rel="stylesheet" href="style.css?v=4" />
 </head>
 <body>
   <!-- Full-screen loader shown until the first month's data has loaded.
@@ -57,11 +57,14 @@
         <span>Budget</span>
       </button>
     </nav>
+
+    <!-- Version label: sits just above the tab bar, bottom-right, on every screen -->
+    <div class="version">v1.1.0</div>
   </div>
 
   <!-- Lightweight toast for fake submits -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
