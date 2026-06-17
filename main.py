@@ -808,7 +808,10 @@ FIRST_RUN_LOOKBACK = 500
 
 async def clear_chat_messages(chat_id: int) -> int:
     """Delete recent messages in a private chat. Sends a silent probe to learn the
-    newest message_id, then deletes from the last-cleared bookmark up to it.
+    newest message_id, posts a permanent "cleared" message (so the chat is never left
+    empty — Telegram auto-unpins chats with 0 messages), then deletes from the
+    last-cleared bookmark up to the probe. The keeper survives this run and is removed
+    by the next one.
 
     Returns the number deleted, or -1 if skipped because the user is mid add-expense
     flow (so we don't wipe a live prompt / inline keyboard and strand them)."""
@@ -827,6 +830,17 @@ async def clear_chat_messages(chat_id: int) -> int:
         return 0
 
     newest = probe.message_id
+    # Post a permanent "cleared" message *before* deleting, so the chat is never left
+    # with 0 messages (Telegram auto-unpins empty chats). Its message_id is higher
+    # than the probe's `newest`, so it falls outside the delete range below and
+    # survives; the next run deletes it (start = newest + 1) and posts a fresh one.
+    # If it can't be sent, skip deleting so we never risk emptying the chat.
+    try:
+        await bot.send_message(chat_id, "✅ Chat cleared!", disable_notification=True)
+    except TelegramError as e:
+        logging.warning("clear: could not post keeper for chat %s, skipping: %s", chat_id, e)
+        return 0
+
     # In a private chat the chat_id equals the user_id, so the clear bookmark is
     # keyed on the same id the store uses everywhere else.
     cleared_up_to = store.get_cleared_up_to(chat_id)
