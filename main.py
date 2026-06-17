@@ -135,8 +135,7 @@ def _gate(update) -> int | None:
     u = update.effective_user
     if u is None:
         return None
-    username = u.username or u.full_name
-    return None if store.ensure_user(u.id, username) else u.id
+    return None if store.ensure_user(u.id) else u.id
 
 
 def _is_admin(update) -> bool:

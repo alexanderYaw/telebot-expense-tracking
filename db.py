@@ -54,11 +54,14 @@ SCHEMA = [
     """
     CREATE TABLE IF NOT EXISTS users (
         user_id    BIGINT PRIMARY KEY,
-        username   TEXT,
+        username   TEXT,                       -- retained but unused: no longer written (privacy)
         banned     BOOLEAN NOT NULL DEFAULT FALSE,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
+    # Usernames are no longer collected (privacy); wipe any captured before this.
+    # Idempotent: matches nothing once they're all NULL.
+    "UPDATE users SET username = NULL WHERE username IS NOT NULL",
     """
     CREATE TABLE IF NOT EXISTS transactions (
         id              TEXT PRIMARY KEY,
@@ -137,18 +140,19 @@ class Store:
     """Per-user data access. Every method takes the Telegram user_id as the tenant key."""
 
     # --- users -------------------------------------------------------
-    def ensure_user(self, user_id: int, username: str | None = None) -> bool:
+    def ensure_user(self, user_id: int) -> bool:
         """Provision a user on first contact (open self-serve). Idempotent.
-        Returns True if the user is banned."""
+        Returns True if the user is banned. Usernames are intentionally NOT stored
+        (privacy) — only the numeric user_id is used anywhere in the app. The no-op
+        DO UPDATE makes the existing row's `banned` come back via RETURNING."""
         with _get_pool().connection() as conn:
             row = conn.execute(
                 """
-                INSERT INTO users (user_id, username) VALUES (%s, %s)
-                ON CONFLICT (user_id) DO UPDATE
-                    SET username = COALESCE(EXCLUDED.username, users.username)
+                INSERT INTO users (user_id) VALUES (%s)
+                ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
                 RETURNING banned
                 """,
-                (user_id, username),
+                (user_id,),
             ).fetchone()
         return bool(row["banned"])
 
