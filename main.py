@@ -245,6 +245,28 @@ def format_expense(expense):
         amount = f"${expense.get('amount', '')}"
     return f"{name} | {category} | {amount}"
 
+# Intro / feature overview shown by /help (legacy Markdown). Edit freely; swap the
+# name in. The webapp features are reached via the Mini App menu button.
+HELP_TEXT = (
+    "👋 *Welcome!* Expense tracking with zero friction.\n\n"
+    "💵 *Log in seconds* — just send an amount like `12.50` and follow the prompts. "
+    "No commands to remember.\n\n"
+    "Open the app (menu button) for everything else:\n\n"
+    "🔁 *Recurring expenses* — add a fixed monthly cost once; it's tracked for you every month.\n\n"
+    "🎯 *Budgeting* — set a monthly budget and see what's left to spend at a glance.\n\n"
+    "🚫 *Exclude from budget* — keep big one-off purchases out of your budget while still logging them.\n\n"
+    "🏷️ *Categories & overview* — sort spending into your own categories and see it all in one "
+    "consolidated dashboard.\n\n"
+    "Send a number to get started 👇"
+)
+
+
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _gate(update) is None:
+        return
+    await update.message.reply_text(HELP_TEXT, parse_mode='Markdown')
+
+
 async def undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = _gate(update)
     if uid is None:
@@ -455,6 +477,7 @@ def build_application():
     application.add_handler(add_expense_conv)
 
     # User commands
+    application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("undo", undo))
     application.add_handler(CommandHandler("list", list_month))
     application.add_handler(CommandHandler("rm", remove))
