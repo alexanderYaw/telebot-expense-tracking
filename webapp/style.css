@@ -74,6 +74,8 @@ html, body {
 /* ---------- View area ---------- */
 .view {
   flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;   /* lets the version label sit at the bottom (margin-top:auto) */
   overflow-y: auto;
   overscroll-behavior: contain;   /* don't chain the scroll out to the page / tab bar */
   padding: 4px 16px 96px;   /* bottom padding clears the tab bar */
@@ -484,17 +486,18 @@ html, body {
   padding-bottom: env(safe-area-inset-bottom);
 }
 
-/* Version label: fixed just above the tab bar, bottom-right, on every screen. */
+/* Version label: pinned to the bottom of the view via margin-top:auto, so on a
+   short screen it sits at the bottom, and on a long/scrolling screen it trails the
+   content (only visible once you scroll down). */
 .version {
-  position: absolute;
-  right: 12px;
-  bottom: calc(62px + env(safe-area-inset-bottom));
+  margin-top: auto;
+  text-align: right;
   font-size: 10px;
   font-weight: 600;
   color: var(--hint);
   opacity: .55;
-  pointer-events: none;
-  z-index: 40;
+  padding-top: 8px;
+  flex: 0 0 auto;
 }
 .tab {
   flex: 1;
