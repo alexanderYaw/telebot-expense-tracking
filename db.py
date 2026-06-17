@@ -62,11 +62,18 @@ SCHEMA = [
     # Usernames are no longer collected (privacy); wipe any captured before this.
     # Idempotent: matches nothing once they're all NULL.
     "UPDATE users SET username = NULL WHERE username IS NOT NULL",
+    # Small key/value table for one-off migration flags (e.g. uid_encrypted).
+    """
+    CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS transactions (
         id              TEXT PRIMARY KEY,
         seq             BIGSERIAL,                 -- insertion order (for /undo and stable bot indices)
-        user_id         BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id         BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
         date            DATE NOT NULL,
         type            TEXT NOT NULL,
         category        TEXT NOT NULL DEFAULT '',
@@ -79,7 +86,7 @@ SCHEMA = [
     "CREATE INDEX IF NOT EXISTS ix_tx_user_date ON transactions(user_id, date)",
     """
     CREATE TABLE IF NOT EXISTS budgets (
-        user_id         BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id         BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
         effective_month CHAR(7) NOT NULL,           -- 'YYYY-MM'
         amount          NUMERIC(12, 2) NOT NULL,    -- 0 = "removed from here onward"
         PRIMARY KEY (user_id, effective_month)
@@ -87,13 +94,13 @@ SCHEMA = [
     """,
     """
     CREATE TABLE IF NOT EXISTS clear_state (
-        user_id       BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id       BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
         cleared_up_to BIGINT NOT NULL
     )
     """,
     """
     CREATE TABLE IF NOT EXISTS categories (
-        user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+        user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
         name    TEXT NOT NULL,
         seq     BIGSERIAL,
         icon    TEXT NOT NULL DEFAULT '',   -- user-chosen emoji ('' = fall back to a default)
@@ -138,6 +145,52 @@ def _tx(row) -> dict:
 
 class Store:
     """Per-user data access. Every method takes the Telegram user_id as the tenant key."""
+
+    # --- meta (one-off migration flags) ------------------------------
+    def meta_get(self, key: str) -> str | None:
+        with _get_pool().connection() as conn:
+            row = conn.execute("SELECT value FROM meta WHERE key = %s", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def meta_set(self, key: str, value: str):
+        with _get_pool().connection() as conn:
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, value),
+            )
+
+    def rekey_user_ids(self, mapping: list[tuple[int, int]]):
+        """One-time migration: rewrite every table's user_id from the old (raw) id to
+        the new (encrypted) token. `mapping` is [(old, new), ...]. The child FKs are
+        ON UPDATE CASCADE, so updating users.user_id propagates to all child rows.
+        Done in two passes through a temporary negative space so a new token can never
+        collide with an as-yet-unmigrated (positive) id. All in one transaction."""
+        if not mapping:
+            return
+        # (table, constraint_name) for every FK onto users.user_id. Postgres' default
+        # constraint name is <table>_<column>_fkey.
+        child_fks = [
+            ("transactions", "transactions_user_id_fkey"),
+            ("budgets", "budgets_user_id_fkey"),
+            ("clear_state", "clear_state_user_id_fkey"),
+            ("categories", "categories_user_id_fkey"),
+        ]
+        with _get_pool().connection() as conn, conn.transaction():
+            # Ensure the child FKs cascade updates (older DBs were created with only
+            # ON DELETE CASCADE), so re-keying users.user_id propagates. Idempotent.
+            for table, name in child_fks:
+                conn.execute(
+                    f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}, "
+                    f"ADD CONSTRAINT {name} FOREIGN KEY (user_id) "
+                    f"REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE"
+                )
+            # Pass 1: old (positive) -> unique temporary negative (-token - 1).
+            for old, new in mapping:
+                conn.execute("UPDATE users SET user_id = %s WHERE user_id = %s", (-new - 1, old))
+            # Pass 2: temporary negative -> final token (positive).
+            for old, new in mapping:
+                conn.execute("UPDATE users SET user_id = %s WHERE user_id = %s", (new, -new - 1))
 
     # --- users -------------------------------------------------------
     def ensure_user(self, user_id: int) -> bool:
