@@ -319,6 +319,17 @@ class Store:
             ).fetchall()
         return [_tx(r) for r in rows]
 
+    def income_transactions(self, user_id: int) -> list[dict]:
+        """A user's income entries, newest first — for the webapp's Income section
+        (manage/edit/delete). Income is recurring monthly."""
+        with _get_pool().connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM transactions WHERE user_id = %s AND type = 'Income' "
+                "ORDER BY seq DESC",
+                (user_id,),
+            ).fetchall()
+        return [_tx(r) for r in rows]
+
     # --- categories (per user, editable) ----------------------------
     def _ensure_categories(self, conn, user_id: int):
         """Return (name, icon, color) rows in order, lazily seeding DEFAULT_CATEGORIES

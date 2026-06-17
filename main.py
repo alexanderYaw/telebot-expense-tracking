@@ -775,6 +775,11 @@ def api_recurring(user_id: int = Depends(require_auth)):
     return {"transactions": store.recurring_transactions(user_id)}
 
 
+@app.get("/api/income")
+def api_income(user_id: int = Depends(require_auth)):
+    return {"transactions": store.income_transactions(user_id)}
+
+
 @app.get("/api/categories")
 def api_categories(user_id: int = Depends(require_auth)):
     return {"categories": store.get_categories_full(user_id)}

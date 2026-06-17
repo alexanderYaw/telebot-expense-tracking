@@ -79,6 +79,7 @@ const STATE = {
   categories: [],                 // user's category names (from /api)
   categoryMeta: {},               // name -> {icon, color} chosen by the user (from /api)
   recurring: null,                // active recurring txs for the Recurring section (null = unloaded)
+  income: null,                   // income entries for the Income section (null = unloaded)
   editingId: null,                // id of the recurring tx being edited (else null)
   editingTx: null,                // the recurring tx object being edited (for prefill)
   loading: false,
@@ -130,6 +131,11 @@ const API = {
   },
   async recurring() {
     const r = await fetch('/api/recurring', { headers: this.headers() });
+    if (!r.ok) throw new Error(`Load failed (${r.status})`);
+    return (await r.json()).transactions;
+  },
+  async income() {
+    const r = await fetch('/api/income', { headers: this.headers() });
     if (!r.ok) throw new Error(`Load failed (${r.status})`);
     return (await r.json()).transactions;
   },
@@ -221,6 +227,17 @@ async function ensureRecurring({ force = false } = {}) {
   } catch (e) {
     STATE.error = e.message || 'Could not load recurring';
     STATE.recurring = STATE.recurring || [];
+  }
+}
+
+// Load the income entries for the Income section.
+async function ensureIncome({ force = false } = {}) {
+  if (!force && STATE.income) return;
+  try {
+    STATE.income = await API.income();
+  } catch (e) {
+    STATE.error = e.message || 'Could not load income';
+    STATE.income = STATE.income || [];
   }
 }
 
@@ -408,7 +425,7 @@ function budgetCard(t) {
   const over = left < 0;
   return `
     <div class="card hero hero-budget">
-      <p class="card-title">Expenditure · ${monthLabel(STATE.month)}</p>
+      <p class="card-title">Budget spent · ${monthLabel(STATE.month)}</p>
       <div class="budget-amount-row">
         <span class="amount">${money(b.spent_this_month)}</span>
       </div>
@@ -435,20 +452,28 @@ function renderAdd() {
     `<button data-add="${a.key}" class="${STATE.addType === a.key ? 'is-active' : ''}">${a.label}</button>`
   ).join('');
 
-  // The Recurring section===================== also lists every active recurring expense to edit/delete.
+  // The Recurring / Income sections also list existing entries to edit/delete.
   const recurringList = STATE.addType === 'recurring'
     ? `<div class="card"><p class="card-title">Active recurring expenses</p>${recurringListBody()}</div>`
+    : '';
+  const incomeList = STATE.addType === 'income'
+    ? `<div class="card"><p class="card-title">Active income</p>${incomeListBody()}</div>`
     : '';
 
   $('#view-add').innerHTML = `
     <div class="segmented">${seg}</div>
     <div class="card">${addForm(STATE.addType)}</div>
-    ${recurringList}`;
+    ${recurringList}${incomeList}`;
 
-  // Lazy-load the recurring list the first time the section is opened.
+  // Lazy-load the relevant list the first time the section is opened.
   if (STATE.addType === 'recurring' && STATE.recurring === null) {
     ensureRecurring().then(() => {
       if (STATE.activeTab === 'add' && STATE.addType === 'recurring') renderAdd();
+    });
+  }
+  if (STATE.addType === 'income' && STATE.income === null) {
+    ensureIncome().then(() => {
+      if (STATE.activeTab === 'add' && STATE.addType === 'income') renderAdd();
     });
   }
 
@@ -460,9 +485,9 @@ function renderAdd() {
       renderAdd();
     }));
 
-  // wire "edit" on a recurring row → prefill the form in update mode
+  // wire "edit" on a recurring/income row → prefill the form in update mode
   $('#view-add').querySelectorAll('[data-edit]').forEach((b) =>
-    b.addEventListener('click', () => startEditRecurring(b.dataset.edit)));
+    b.addEventListener('click', () => startEdit(b.dataset.edit)));
 
   // wire "cancel edit" / "delete" inside the edit form
   const cancelEdit = $('#edit-cancel');
@@ -470,7 +495,7 @@ function renderAdd() {
     STATE.editingId = null; STATE.editingTx = null; renderAdd();
   });
   const editDelete = $('#edit-delete');
-  if (editDelete) editDelete.addEventListener('click', onRecurringDelete);
+  if (editDelete) editDelete.addEventListener('click', onEditDelete);
 
   // wire category chips (only present for expense/recurring). Restyle in place
   // rather than re-rendering the form, which would wipe the amount/name the user
@@ -547,6 +572,33 @@ function recurringListBody() {
   return STATE.recurring.map(recurringRow).join('');
 }
 
+// An income row. Tapping anywhere opens it for editing (edit/delete in that form).
+function incomeRow(t) {
+  return `
+    <div class="tx tappable" data-edit="${escapeHtml(t.id || '')}" role="button" tabindex="0">
+      <div class="tx-icon" style="background:var(--pos)22;color:var(--pos)">💰</div>
+      <div class="tx-main">
+        <div class="tx-name">${escapeHtml(t.name || '(no name)')}</div>
+        <div class="tx-sub"><span class="pill" style="background:var(--pos)">Income</span></div>
+      </div>
+      <div class="tx-amt pos">${money(t.amount)}</div>
+      <span class="tx-chevron" aria-hidden="true">›</span>
+    </div>`;
+}
+
+function incomeListBody() {
+  if (STATE.income === null) return `<div class="banner">Loading…</div>`;
+  if (!STATE.income.length) return emptyInline('No income yet');
+  return STATE.income.map(incomeRow).join('');
+}
+
+// Open the form in edit mode for the tapped row — recurring expense or income,
+// depending on which section is active.
+function startEdit(id) {
+  if (STATE.addType === 'income') return startEditIncome(id);
+  return startEditRecurring(id);
+}
+
 function startEditRecurring(id) {
   const tx = (STATE.recurring || []).find((t) => t.id === id);
   if (!tx) return;
@@ -557,18 +609,30 @@ function startEditRecurring(id) {
   $('.view').scrollTop = 0;
 }
 
-async function onRecurringDelete() {
+function startEditIncome(id) {
+  const tx = (STATE.income || []).find((t) => t.id === id);
+  if (!tx) return;
+  STATE.editingId = id;
+  STATE.editingTx = tx;
+  renderAdd();
+  $('.view').scrollTop = 0;
+}
+
+// Delete the entry currently being edited (recurring expense or income).
+async function onEditDelete() {
   if (!STATE.editingId || !STATE.editingTx) return;
+  const isIncome = STATE.addType === 'income';
+  const label = isIncome ? 'income' : 'recurring expense';
   const ok = (tg && tg.showConfirm)
-    ? await new Promise((res) => tg.showConfirm('Delete this recurring expense?', res))
-    : window.confirm('Delete this recurring expense?');
+    ? await new Promise((res) => tg.showConfirm(`Delete this ${label}?`, res))
+    : window.confirm(`Delete this ${label}?`);
   if (!ok) return;
   const id = STATE.editingId;
   const month = (STATE.editingTx.date || '').slice(0, 7);
   try {
     await API.remove(id, month);
     STATE.editingId = null; STATE.editingTx = null;
-    STATE.recurring = null;   // reload the list
+    if (isIncome) STATE.income = null; else STATE.recurring = null;   // reload the list
     STATE.cache = {};
     invalidateBudget();
     haptic('success');
@@ -604,11 +668,16 @@ function addForm(type) {
       <button id="edit-cancel" class="btn-ghost">Cancel edit</button>` : ''}`;
   }
   if (type === 'income') {
+    const e = STATE.editingTx;  // set when editing an existing income entry
+    const nameVal = e ? escapeHtml(e.name || '') : '';
+    const amtVal = e ? e.amount : '';
     return `
-      <div class="field"><label>Source</label><input id="f-name" placeholder="e.g. Monthly salary"></div>
-      ${amountField()}
+      <div class="field"><label>Source</label><input id="f-name" placeholder="e.g. Monthly salary" value="${nameVal}"></div>
+      <div class="field"><label>Amount</label><div class="amount-input"><span>$</span><input id="f-amount" type="number" inputmode="decimal" placeholder="0.00" step="0.01" min="0" value="${amtVal}"></div></div>
       <p class="hint-text">Recurring monthly income.</p>
-      <button id="add-submit" class="btn-primary">Add income</button>`;
+      <button id="add-submit" class="btn-primary">${e ? 'Update income' : 'Add income'}</button>
+      ${e ? `<button id="edit-delete" class="btn-secondary">Delete income</button>
+      <button id="edit-cancel" class="btn-ghost">Cancel edit</button>` : ''}`;
   }
   // incoming funds (one-off payment from a person)
   return `
@@ -649,6 +718,26 @@ async function onAddSubmit() {
     return;
   }
 
+  // Editing an existing income entry → PATCH name/amount instead of inserting.
+  if (type === 'income' && STATE.editingId) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+      await API.edit(STATE.editingId, { name, amount });
+      STATE.editingId = null; STATE.editingTx = null;
+      STATE.income = null;   // reload the list
+      STATE.cache = {};      // the edited row may be in any month
+      invalidateBudget();
+      haptic('success');
+      toast('✅ Updated');
+      renderAdd();
+    } catch (e) {
+      haptic('error');
+      toast('⚠️ ' + (e.message || 'Could not save'));
+      if (btn) { btn.disabled = false; btn.textContent = 'Update income'; }
+    }
+    return;
+  }
+
   const date = (($('#f-date') || {}).value) || todayISO();
   let tx;
   if (type === 'expense')   tx = { date, type: 'Expense',  category: STATE.addCategory, amount, name, budget_excluded: budgetExcluded };
@@ -663,7 +752,9 @@ async function onAddSubmit() {
     const ym = (created.date || tx.date).slice(0, 7);
     if (STATE.cache[ym]) STATE.cache[ym].push(created); else invalidate(ym);
     invalidateBudget();           // surplus/savings/left changed
-    if (tx.recurring) STATE.recurring = null;  // new recurring → reload its list
+    // New entry → reload the relevant section list.
+    if (tx.type === 'Income') STATE.income = null;
+    else if (tx.recurring) STATE.recurring = null;
     haptic('success');
     toast('✅ Added ' + money(amount));
     STATE.month = ym;
@@ -966,7 +1057,8 @@ async function onTxEditSave(tx, month, chosen, root) {
     await API.edit(tx.id, patch);
     invalidate(month);
     invalidateBudget();
-    if (tx.recurring) STATE.recurring = null;   // a recurring item changed → reload
+    if (tx.type === 'Income') STATE.income = null;   // keep the section lists fresh
+    else if (tx.recurring) STATE.recurring = null;
     haptic('success');
     toast('✅ Updated');
     root.remove();
@@ -989,7 +1081,8 @@ async function onTxDelete(tx, month, root) {
     await API.remove(tx.id, month);
     invalidate(month);
     invalidateBudget();
-    if (tx.recurring) STATE.recurring = null;
+    if (tx.type === 'Income') STATE.income = null;   // keep the section lists fresh
+    else if (tx.recurring) STATE.recurring = null;
     haptic('success');
     toast('🗑️ Deleted');
     root.remove();
