@@ -968,7 +968,22 @@ def health():
 # Serve the Mini App's static files. Mounted last so it doesn't shadow the
 # API/webhook routes above. html=True makes "/" serve index.html.
 _WEBAPP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webapp")
-app.mount("/", StaticFiles(directory=_WEBAPP_DIR, html=True), name="webapp")
+
+
+class _WebappStatic(StaticFiles):
+    """StaticFiles that tells clients never to cache index.html. The HTML is the
+    entry point that references app.js?v=N / style.css?v=N, so it must always be
+    re-fetched — otherwise a client keeps an old index.html (with old ?v= refs) and
+    never sees a deploy. The versioned JS/CSS themselves stay cacheable."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if path in ("", ".", "/") or path.endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return response
+
+
+app.mount("/", _WebappStatic(directory=_WEBAPP_DIR, html=True), name="webapp")
 
 
 if __name__ == "__main__":

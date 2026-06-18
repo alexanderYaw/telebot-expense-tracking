@@ -400,7 +400,16 @@ html, body {
   color: var(--text);
 }
 .cat-create-top #new-cat { flex: 1 1 auto; min-width: 0; }
-.cat-create-top .emoji-input { flex: 0 0 auto; width: 52px; text-align: center; font-size: 20px; padding: 10px 0; cursor: default; caret-color: transparent; }
+.cat-create-top .emoji-input { flex: 0 0 auto; width: 52px; text-align: center; font-size: 20px; padding: 10px 0; }
+/* The emoji "field" is a display-only span, not an input — pick via the palette only. */
+.cat-create-top .emoji-display {
+  display: inline-flex; align-items: center; justify-content: center;
+  height: 44px; box-sizing: border-box;
+  border: 1.5px solid var(--line); border-radius: 12px;
+  background: var(--card-bg);
+  cursor: default; user-select: none; -webkit-user-select: none;
+}
+.cat-create-top .emoji-display.is-placeholder { opacity: 0.45; }
 /* Emoji quick-pick palette */
 .emoji-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .emoji-opt {

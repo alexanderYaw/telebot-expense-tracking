@@ -48,8 +48,9 @@ const CAT_STYLE = {
 };
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
   '#eab308', '#06b6d4', '#f43f5e', '#84cc16', '#6366f1', '#d946ef'];
-// Quick-pick emojis for the new-category form. The icon field is read-only — the user
-// can only set the emoji by tapping one from this palette, not by typing or pasting.
+// Quick-pick emojis for the new-category form. The icon "field" is a display-only
+// element (not a text input), so the user can ONLY set the emoji by tapping one of
+// these — there's nothing to tap into and type.
 const EMOJI_CHOICES = ['🍜', '🍔', '☕', '🛒', '🛍️', '🚌', '🚗', '⛽', '🏠', '💡',
   '🧾', '💊', '🏥', '🎬', '🎮', '✈️', '🏋️', '🧗', '🐶', '🎁', '💰', '📚', '👕', '💅'];
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
@@ -875,7 +876,7 @@ function openCategoryModal() {
       <div class="modal-head"><span>Manage categories</span><button class="modal-close" aria-label="Close">✕</button></div>
       <div class="cat-create">
         <div class="cat-create-top">
-          <input id="new-cat-icon" class="emoji-input" placeholder="🙂" maxlength="8" readonly aria-label="Emoji (choose below)">
+          <span id="new-cat-icon" class="emoji-input emoji-display is-placeholder" data-icon="" role="img" aria-label="Chosen emoji">🙂</span>
           <input id="new-cat" placeholder="New category" maxlength="24">
         </div>
         <div class="emoji-picker" id="emoji-picker">${EMOJI_CHOICES.map((e) =>
@@ -903,11 +904,17 @@ function wireCategoryModal(root) {
   if (addCat) addCat.addEventListener('click', onCategoryAdd);
   const newCat = $('#new-cat', root);
   if (newCat) newCat.addEventListener('keydown', (e) => { if (e.key === 'Enter') onCategoryAdd(); });
-  // Emoji quick-pick: tapping one fills the emoji field (which onCategoryAdd reads).
+  // Emoji quick-pick: tapping one sets the chosen emoji. The icon "field" is a
+  // display-only <span> (not an input), so the palette is the ONLY way to pick — the
+  // user can't tap into it and type. onCategoryAdd reads iconEl.dataset.icon.
   root.querySelectorAll('#emoji-picker .emoji-opt').forEach((b) =>
     b.addEventListener('click', () => {
       const iconEl = $('#new-cat-icon', root);
-      if (iconEl) iconEl.value = b.dataset.emoji;
+      if (iconEl) {
+        iconEl.dataset.icon = b.dataset.emoji;
+        iconEl.textContent = b.dataset.emoji;
+        iconEl.classList.remove('is-placeholder');
+      }
       root.querySelectorAll('#emoji-picker .emoji-opt').forEach((x) => x.classList.remove('is-active'));
       b.classList.add('is-active');
     }));
@@ -942,13 +949,13 @@ async function onCategoryAdd() {
   const name = ((nameEl && nameEl.value) || '').trim();
   if (!name) { toast('⚠️ Enter a category name'); return; }
   const iconEl = $('#new-cat-icon', root);
-  const icon = ((iconEl && iconEl.value) || '').trim();
+  const icon = ((iconEl && iconEl.dataset.icon) || '').trim();
   const sw = $('#cat-swatches .swatch.is-active', root);
   const color = sw ? sw.dataset.color : '';
   try {
     setCategories(await API.categoryAdd(name, icon, color));
     if (nameEl) nameEl.value = '';
-    if (iconEl) iconEl.value = '';
+    if (iconEl) { iconEl.dataset.icon = ''; iconEl.textContent = '🙂'; iconEl.classList.add('is-placeholder'); }
     root.querySelectorAll('#emoji-picker .emoji-opt.is-active').forEach((x) => x.classList.remove('is-active'));
     haptic('success');
     refreshCategoryModal();
