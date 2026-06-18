@@ -48,9 +48,8 @@ const CAT_STYLE = {
 };
 const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef4444',
   '#eab308', '#06b6d4', '#f43f5e', '#84cc16', '#6366f1', '#d946ef'];
-// Quick-pick emojis for the new-category form (the OS emoji keyboard can't be forced
-// open for a web input, so we offer a tappable palette; the field still accepts any
-// emoji the user types or pastes).
+// Quick-pick emojis for the new-category form. The icon field is read-only — the user
+// can only set the emoji by tapping one from this palette, not by typing or pasting.
 const EMOJI_CHOICES = ['🍜', '🍔', '☕', '🛒', '🛍️', '🚌', '🚗', '⛽', '🏠', '💡',
   '🧾', '💊', '🏥', '🎬', '🎮', '✈️', '🏋️', '🧗', '🐶', '🎁', '💰', '📚', '👕', '💅'];
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
@@ -876,7 +875,7 @@ function openCategoryModal() {
       <div class="modal-head"><span>Manage categories</span><button class="modal-close" aria-label="Close">✕</button></div>
       <div class="cat-create">
         <div class="cat-create-top">
-          <input id="new-cat-icon" class="emoji-input" placeholder="🙂" maxlength="8" inputmode="text" aria-label="Emoji">
+          <input id="new-cat-icon" class="emoji-input" placeholder="🙂" maxlength="8" readonly aria-label="Emoji (choose below)">
           <input id="new-cat" placeholder="New category" maxlength="24">
         </div>
         <div class="emoji-picker" id="emoji-picker">${EMOJI_CHOICES.map((e) =>
@@ -912,12 +911,6 @@ function wireCategoryModal(root) {
       root.querySelectorAll('#emoji-picker .emoji-opt').forEach((x) => x.classList.remove('is-active'));
       b.classList.add('is-active');
     }));
-  // Keep the picker's highlight in sync if the user types/clears the field by hand.
-  const iconInput = $('#new-cat-icon', root);
-  if (iconInput) iconInput.addEventListener('input', () => {
-    root.querySelectorAll('#emoji-picker .emoji-opt').forEach((x) =>
-      x.classList.toggle('is-active', x.dataset.emoji === iconInput.value));
-  });
   // Colour swatches: tapping one selects it (single active swatch).
   root.querySelectorAll('#cat-swatches .swatch').forEach((s) =>
     s.addEventListener('click', () => {

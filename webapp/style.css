@@ -400,7 +400,7 @@ html, body {
   color: var(--text);
 }
 .cat-create-top #new-cat { flex: 1 1 auto; min-width: 0; }
-.cat-create-top .emoji-input { flex: 0 0 auto; width: 52px; text-align: center; font-size: 20px; padding: 10px 0; }
+.cat-create-top .emoji-input { flex: 0 0 auto; width: 52px; text-align: center; font-size: 20px; padding: 10px 0; cursor: default; caret-color: transparent; }
 /* Emoji quick-pick palette */
 .emoji-picker { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .emoji-opt {
