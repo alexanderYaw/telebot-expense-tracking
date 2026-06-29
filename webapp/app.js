@@ -53,6 +53,12 @@ const CAT_PALETTE = ['#1faa6c', '#3b82f6', '#a855f7', '#14b8a6', '#f59e0b', '#ef
 // these — there's nothing to tap into and type.
 const EMOJI_CHOICES = ['🍜', '🍔', '☕', '🛒', '🛍️', '🚌', '🚗', '⛽', '🏠', '💡',
   '🧾', '💊', '🏥', '🎬', '🎮', '✈️', '🏋️', '🧗', '🐶', '🎁', '💰', '📚', '👕', '💅'];
+// Built-in pseudo-category for received one-off payments (type 'Incoming'). It is
+// NOT a user expense category — it never lives in STATE.categories and can't be
+// chosen when adding an expense. It exists only to group/filter Incoming payments
+// in the Categories tab. The name is reserved server-side so a user can't create an
+// expense category that collides with it.
+const INCOMING_CAT = 'Incoming';
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h); }
 // Resolution order: the user's chosen icon/colour for the category (from /api) →
 // a hand-picked style for known default names → a deterministic palette colour and
@@ -815,20 +821,26 @@ function renderHistory() {
 //  VIEW: CATEGORIES  (list filtered by category)
 // ============================================================
 function renderCategories() {
-  const rows = txForMonth(STATE.month).filter((t) => t.type === 'Expense');
+  const monthRows = txForMonth(STATE.month);
+  const rows = monthRows.filter((t) => t.type === 'Expense');
+  // Received one-off payments, grouped under the built-in "Incoming" pseudo-category.
+  const incomingRows = monthRows.filter((t) => t.type === 'Incoming');
 
-  // per-category totals for the breakdown
+  // per-category totals for the breakdown (expenses only)
   const byCat = {};
   for (const r of rows) byCat[r.category] = (byCat[r.category] || 0) + r.amount;
   const maxCat = Math.max(1, ...Object.values(byCat));
   const totalSpent = Object.values(byCat).reduce((a, b) => a + b, 0);
 
+  // All + the user's expense categories + the built-in Incoming filter (only shown
+  // when there are payments to browse, so it doesn't clutter an empty month).
   const filterCats = ['All', ...STATE.categories];
-  const chips = filterCats.map((c) =>
-    `<button class="chip ${STATE.categoryFilter === c ? 'is-active' : ''}" data-filter="${escapeHtml(c)}">${escapeHtml(c)}</button>`
-  ).join('');
-
-  const filtered = STATE.categoryFilter === 'All' ? rows : rows.filter((r) => r.category === STATE.categoryFilter);
+  // Keep the chip while it's the active filter so an empty month isn't a dead-end.
+  if (incomingRows.length || STATE.categoryFilter === INCOMING_CAT) filterCats.push(INCOMING_CAT);
+  const chips = filterCats.map((c) => {
+    const label = c === INCOMING_CAT ? '🤝 ' + escapeHtml(c) : escapeHtml(c);
+    return `<button class="chip ${STATE.categoryFilter === c ? 'is-active' : ''}" data-filter="${escapeHtml(c)}">${label}</button>`;
+  }).join('');
 
   const breakdown = Object.entries(byCat).sort((a, b) => b[1] - a[1]).map(([c, v]) => `
     <div class="bar-row">
@@ -836,21 +848,38 @@ function renderCategories() {
       <div class="bar-track"><div class="bar-fill" style="width:${(v / maxCat) * 100}%;background:${catColor(c)}"></div></div>
     </div>`).join('');
 
+  // Body card depends on the active filter: All → breakdown; Incoming → received
+  // payments; any expense category → that category's expenses.
+  let bodyCard;
+  if (STATE.categoryFilter === 'All') {
+    bodyCard = `
+      <div class="card">
+        <p class="card-title">Breakdown · ${money(totalSpent)}</p>
+        ${breakdown || emptyInline('No expenses this month')}
+      </div>`;
+  } else if (STATE.categoryFilter === INCOMING_CAT) {
+    const total = incomingRows.reduce((a, r) => a + r.amount, 0);
+    bodyCard = `
+      <div class="card">
+        <p class="card-title">🤝 Incoming · ${money(total)}</p>
+        ${incomingRows.length ? incomingRows.map(txRow).join('') : emptyInline('No incoming payments this month')}
+      </div>`;
+  } else {
+    const filtered = rows.filter((r) => r.category === STATE.categoryFilter);
+    bodyCard = `
+      <div class="card">
+        <p class="card-title">${escapeHtml(STATE.categoryFilter)} · ${money(filtered.reduce((a, r) => a + r.amount, 0))}</p>
+        ${filtered.length ? filtered.map(txRow).join('') : emptyInline('Nothing in ' + STATE.categoryFilter)}
+      </div>`;
+  }
+
   // Manage categories: a clickable bar that opens the edit popup.
   const manageBar = `<button class="manage-bar" id="manage-cats">Manage categories<span class="chev">›</span></button>`;
 
   $('#view-categories').innerHTML = `
     ${statusBanner()}
     <div class="chips">${chips}</div>
-    ${STATE.categoryFilter === 'All' ? `
-      <div class="card">
-        <p class="card-title">Breakdown · ${money(totalSpent)}</p>
-        ${breakdown || emptyInline('No expenses this month')}
-      </div>` : `
-      <div class="card">
-        <p class="card-title">${escapeHtml(STATE.categoryFilter)} · ${money(filtered.reduce((a, r) => a + r.amount, 0))}</p>
-        ${filtered.length ? filtered.map(txRow).join('') : emptyInline('Nothing in ' + STATE.categoryFilter)}
-      </div>`}
+    ${bodyCard}
     ${manageBar}`;
 
   $('#view-categories').querySelectorAll('[data-filter]').forEach((b) =>

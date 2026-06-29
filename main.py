@@ -131,11 +131,18 @@ def clean_amount(amount, label="amount"):
 
 # '|' is the bot's category callback_data delimiter, so disallow it; keep names
 # short enough to stay well under Telegram's 64-byte callback_data limit.
+# "Incoming" is reserved: the webapp uses it as a built-in pseudo-category to group
+# received payments (type 'Incoming') in the Categories tab, so a user-created
+# expense category of the same name would collide with that filter.
+RESERVED_CATEGORIES = {"incoming"}
+
 def clean_category(name):
     """Return a trimmed category name, or raise ValueError if invalid."""
     name = (name or "").strip()
     if not name or len(name) > 24 or "|" in name or "\n" in name:
         raise ValueError("category must be 1–24 characters and not contain '|'")
+    if name.lower() in RESERVED_CATEGORIES:
+        raise ValueError(f"'{name}' is a reserved category name")
     return name
 
 _HEX_COLOR_RE = re.compile(r"^#?[0-9a-fA-F]{6}$")
