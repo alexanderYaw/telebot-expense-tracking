@@ -79,6 +79,7 @@ const STATE = {
   addType: 'expense',             // expense | recurring | income | incoming
   addCategory: 'Food',
   categoryFilter: 'All',
+  budgetOnly: false,              // Categories tab: count only budgeted (non-excluded) expenses
   cache: {},                      // { 'YYYY-MM': [tx, ...] }  (undefined = not loaded)
   budget: null,                   // last-fetched budget summary (see API.budgetGet)
   budgetMonth: null,              // the month STATE.budget was computed for
@@ -822,7 +823,10 @@ function renderHistory() {
 // ============================================================
 function renderCategories() {
   const monthRows = txForMonth(STATE.month);
-  const rows = monthRows.filter((t) => t.type === 'Expense');
+  // When the budget switch is on, count only expenses that go toward the budget
+  // (i.e. not flagged off-budget); otherwise count every expense.
+  const rows = monthRows.filter((t) =>
+    t.type === 'Expense' && (!STATE.budgetOnly || !t.budget_excluded));
   // Received one-off payments, grouped under the built-in "Incoming" pseudo-category.
   const incomingRows = monthRows.filter((t) => t.type === 'Incoming');
 
@@ -873,17 +877,34 @@ function renderCategories() {
       </div>`;
   }
 
+  // Budget switch: counts only budgeted expenses in the totals. Not shown for the
+  // Incoming filter, where it has no effect (incoming payments aren't expenses).
+  const budgetSwitch = STATE.categoryFilter === INCOMING_CAT ? '' : `
+    <label class="switch-field">
+      <span class="switch-label">Budgeted only</span>
+      <span class="switch">
+        <input id="cat-budget-only" type="checkbox" ${STATE.budgetOnly ? 'checked' : ''}>
+        <span class="slider"></span>
+      </span>
+    </label>`;
+
   // Manage categories: a clickable bar that opens the edit popup.
   const manageBar = `<button class="manage-bar" id="manage-cats">Manage categories<span class="chev">›</span></button>`;
 
   $('#view-categories').innerHTML = `
     ${statusBanner()}
     <div class="chips">${chips}</div>
+    ${budgetSwitch}
     ${bodyCard}
     ${manageBar}`;
 
   $('#view-categories').querySelectorAll('[data-filter]').forEach((b) =>
     b.addEventListener('click', () => { STATE.categoryFilter = b.dataset.filter; renderCategories(); }));
+
+  const budgetToggle = $('#cat-budget-only');
+  if (budgetToggle) budgetToggle.addEventListener('change', (e) => {
+    STATE.budgetOnly = e.target.checked; renderCategories();
+  });
 
   const manageBtn = $('#manage-cats');
   if (manageBtn) manageBtn.addEventListener('click', openCategoryModal);
