@@ -22,7 +22,7 @@ from telegram.ext import (
 )
 from dotenv import load_dotenv
 from fastapi import FastAPI, Header, HTTPException, Request, Depends
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -967,9 +967,14 @@ async def api_clear(x_task_token: str = Header(default="")):
 def health():
     """Keep-alive target for an external cron (every ~10 min) so Render's free
     instance never spins down. The SELECT 1 also keeps the scale-to-zero DB warm,
-    killing both cold starts in one ping. Public + cheap; exposes nothing."""
-    store.ping()
-    return {"ok": True}
+    killing both cold starts in one ping. Public + cheap; exposes nothing.
+
+    If the DB is still mid-wake, ping() returns False rather than raising: we
+    report 503 (DB warming) instead of a noisy 500 traceback. The attempt itself
+    kicks off Neon's wake, so the next ping lands warm."""
+    if store.ping():
+        return {"ok": True}
+    return JSONResponse(status_code=503, content={"ok": False, "db": "warming"})
 
 
 # Serve the Mini App's static files. Mounted last so it doesn't shadow the

@@ -13,6 +13,7 @@ from datetime import datetime, date as date_cls
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from psycopg_pool import PoolTimeout
 
 # Seeded for each user the first time their categories are read. After that the
 # list is fully user-editable (add/remove) and stored per user.
@@ -39,12 +40,22 @@ def _get_pool() -> ConnectionPool:
         # statements. Neon's pooled endpoint (the `-pooler` host) is PgBouncer in
         # transaction-pooling mode, where prepared statements span connections and
         # break ("prepared statement already exists"). Harmless on a direct endpoint.
+        # connect_timeout bounds each individual connection attempt. Without it,
+        # libpq falls back to the OS TCP timeout, so a single attempt to a
+        # Neon compute that's mid-wake can hang and monopolize the pool's
+        # background worker — burning most of the 30s checkout window on one
+        # failed attempt instead of retrying. 10s lets a slow wake fail fast
+        # and the pool reconnect within the checkout timeout.
         _pool = ConnectionPool(
             dsn,
             min_size=1,
             max_size=5,
             check=ConnectionPool.check_connection,
-            kwargs={"row_factory": dict_row, "prepare_threshold": None},
+            kwargs={
+                "row_factory": dict_row,
+                "prepare_threshold": None,
+                "connect_timeout": 10,
+            },
         )
     return _pool
 
@@ -488,9 +499,18 @@ class Store:
         return row["cleared_up_to"] if row else None
 
     def ping(self):
-        """Trivial query used by /health to keep the (scale-to-zero) DB warm."""
-        with _get_pool().connection() as conn:
-            conn.execute("SELECT 1")
+        """Trivial query used by /health to keep the (scale-to-zero) DB warm.
+
+        Returns True if the DB answered, False if it couldn't be reached in time
+        (e.g. Neon still mid-wake). The caller decides how to report that — this
+        is a keep-alive, so a transient cold-start miss shouldn't raise: the very
+        act of trying kicks off the wake, and the next ping lands warm."""
+        try:
+            with _get_pool().connection() as conn:
+                conn.execute("SELECT 1")
+            return True
+        except PoolTimeout:
+            return False
 
     def set_cleared_up_to(self, user_id: int, message_id: int):
         with _get_pool().connection() as conn:
