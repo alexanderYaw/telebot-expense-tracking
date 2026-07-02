@@ -102,6 +102,16 @@ SCHEMA = [
         cleared_up_to BIGINT NOT NULL
     )
     """,
+    # Watermark for the monthly recurring/income materialization (see materialize_recurring).
+    """
+    CREATE TABLE IF NOT EXISTS recurring_state (
+        user_id            BIGINT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
+        materialized_up_to CHAR(7) NOT NULL   -- 'YYYY-MM' last generated through
+    )
+    """,
+    # Income has always been conceptually monthly (the webapp adds it with recurring=TRUE);
+    # mark any older rows so they're treated as templates. Idempotent once all are TRUE.
+    "UPDATE transactions SET recurring = TRUE WHERE type = 'Income' AND NOT recurring",
     """
     CREATE TABLE IF NOT EXISTS categories (
         user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -131,6 +141,24 @@ def _month_bounds(ym: str):
     start = datetime.strptime(ym, "%Y-%m").date()
     end = date_cls(start.year + 1, 1, 1) if start.month == 12 else date_cls(start.year, start.month + 1, 1)
     return start, end
+
+
+def _add_month(ym: str, delta: int) -> str:
+    """Shift a 'YYYY-MM' by whole months. _add_month('2026-12', 1) -> '2027-01'."""
+    y, m = map(int, ym.split("-"))
+    idx = (y * 12 + (m - 1)) + delta
+    return f"{idx // 12:04d}-{idx % 12 + 1:02d}"
+
+
+def _months_between(after_ym: str, through_ym: str) -> list[str]:
+    """Months strictly after `after_ym` up to and including `through_ym`, ascending.
+    Empty if `after_ym >= through_ym`."""
+    out = []
+    m = _add_month(after_ym, 1)
+    while m <= through_ym:
+        out.append(m)
+        m = _add_month(m, 1)
+    return out
 
 
 def _tx(row) -> dict:
@@ -331,15 +359,73 @@ class Store:
         return [_tx(r) for r in rows]
 
     def income_transactions(self, user_id: int) -> list[dict]:
-        """A user's income entries, newest first — for the webapp's Income section
-        (manage/edit/delete). Income is recurring monthly."""
+        """A user's income templates, newest first — for the webapp's Income section
+        (manage/edit/delete). Income is recurring monthly; the generated monthly
+        instances (recurring=FALSE) are excluded so only the templates are listed."""
         with _get_pool().connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM transactions WHERE user_id = %s AND type = 'Income' "
-                "ORDER BY seq DESC",
+                "AND recurring ORDER BY seq DESC",
                 (user_id,),
             ).fetchall()
         return [_tx(r) for r in rows]
+
+    def materialize_recurring(self, user_id: int, current_ym: str) -> int:
+        """Generate this month's (and any missed months') concrete transactions from the
+        user's recurring templates. A "template" is a row with recurring=TRUE (recurring
+        expenses and income); each becomes a plain instance (recurring=FALSE) dated the
+        1st of the month, so it counts toward that month's spend/income while staying out
+        of the manage tabs and the recurring-total card (both filter recurring=TRUE).
+
+        Idempotent + catch-up via a per-user watermark: the first run generates only the
+        current month (never back-filling pre-feature history), later runs fill every
+        month through `current_ym`. A template is skipped for its own creation month
+        (already counted by the template row itself), avoiding a double-count. Returns the
+        number of instances created."""
+        with _get_pool().connection() as conn:
+            row = conn.execute(
+                "SELECT materialized_up_to FROM recurring_state WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+            # No watermark yet → pretend last month was done, so only current_ym generates.
+            last = row["materialized_up_to"] if row else _add_month(current_ym, -1)
+            months = _months_between(last, current_ym)
+            if not months:
+                return 0  # already materialized through current_ym
+
+            templates = conn.execute(
+                "SELECT date, type, category, amount, name, budget_excluded "
+                "FROM transactions WHERE user_id = %s AND recurring "
+                "AND type IN ('Expense', 'Income')",
+                (user_id,),
+            ).fetchall()
+
+            new_rows = []
+            for m in months:
+                first_of_month = f"{m}-01"
+                for t in templates:
+                    # Skip the template's own creation month — that row already counts it.
+                    if t["date"].strftime("%Y-%m") < m:
+                        new_rows.append((
+                            str(uuid.uuid4())[:8], user_id, first_of_month, t["type"],
+                            t["category"], t["amount"], t["name"], False,
+                            t["budget_excluded"],
+                        ))
+
+            if new_rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        "INSERT INTO transactions "
+                        "(id, user_id, date, type, category, amount, name, recurring, budget_excluded) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        new_rows,
+                    )
+            conn.execute(
+                "INSERT INTO recurring_state (user_id, materialized_up_to) VALUES (%s, %s) "
+                "ON CONFLICT (user_id) DO UPDATE SET materialized_up_to = EXCLUDED.materialized_up_to",
+                (user_id, current_ym),
+            )
+        return len(new_rows)
 
     # --- categories (per user, editable) ----------------------------
     def _ensure_categories(self, conn, user_id: int):

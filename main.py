@@ -963,6 +963,26 @@ async def api_clear(x_task_token: str = Header(default="")):
     return {"status": "accepted"}
 
 
+# --- MONTHLY RECURRING MATERIALIZATION ---
+# Triggered by an external cron (daily is fine — it's a no-op until a new month starts).
+# Turns each user's recurring templates (recurring expenses + income) into a concrete,
+# plain transaction dated the 1st of the month. See Store.materialize_recurring.
+RECURRING_TASK_TOKEN = os.getenv("RECURRING_TASK_TOKEN")
+
+
+@app.post("/tasks/recurring")
+def api_recurring_run(x_task_token: str = Header(default="")):
+    # Guarded by a shared secret; disabled (always 403) if the token env var is unset.
+    if not RECURRING_TASK_TOKEN or not hmac.compare_digest(x_task_token, RECURRING_TASK_TOKEN):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    # DB-only and fast, so run synchronously. Same local-time convention as the rest of
+    # the app (add_transaction / set_budget both use datetime.now()).
+    current = datetime.now().strftime("%Y-%m")
+    result = {uid: store.materialize_recurring(uid, current) for uid in store.all_user_ids()}
+    logging.info("recurring materialize: %s", result)
+    return {"status": "ok", "created": sum(result.values())}
+
+
 @app.get("/health")
 def health():
     """Keep-alive target for an external cron (every ~10 min) so Render's free
