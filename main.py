@@ -782,9 +782,59 @@ def api_recurring(user_id: int = Depends(require_auth)):
     return {"transactions": store.recurring_transactions(user_id)}
 
 
+class IncomeIn(BaseModel):
+    name: str = ""
+    amount: float
+
+
+class IncomeEdit(BaseModel):
+    name: str | None = None
+    amount: float | None = None
+
+
 @app.get("/api/income")
 def api_income(user_id: int = Depends(require_auth)):
-    return {"transactions": store.income_transactions(user_id)}
+    """The user's income definitions (templates). Each is posted as a plain
+    transaction at the start of every month; edits/deletes only affect months not
+    yet posted, so past and current months keep the amount that was in effect."""
+    return {"incomes": store.income_definitions(user_id)}
+
+
+@app.post("/api/income")
+def api_income_add(inc: IncomeIn, user_id: int = Depends(require_auth)):
+    try:
+        amount = clean_amount(inc.amount)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # New income posts its first instance for the current month right away; later
+    # months come from the monthly materialization. Same local-time month anchor as
+    # set_budget / the /tasks/recurring job.
+    current = datetime.now().strftime("%Y-%m")
+    income, transaction = store.add_income(user_id, inc.name.strip(), amount, current)
+    return {"income": income, "transaction": transaction}
+
+
+@app.patch("/api/income/{income_id}")
+def api_income_edit(income_id: str, inc: IncomeEdit, user_id: int = Depends(require_auth)):
+    amount = None
+    if inc.amount is not None:
+        try:
+            amount = clean_amount(inc.amount)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    name = inc.name.strip() if inc.name is not None else None
+    updated = store.edit_income(user_id, income_id, name=name, amount=amount)
+    if not updated:
+        raise HTTPException(status_code=404, detail="No income with that id")
+    return {"income": updated}
+
+
+@app.delete("/api/income/{income_id}")
+def api_income_delete(income_id: str, user_id: int = Depends(require_auth)):
+    deleted = store.delete_income(user_id, income_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="No income with that id")
+    return {"deleted": deleted}
 
 
 @app.get("/api/categories")

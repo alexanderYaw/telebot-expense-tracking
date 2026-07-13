@@ -8,9 +8,12 @@ before DATABASE_URL is configured (useful mid-migration).
 """
 
 import os
+import socket
 import uuid
 from datetime import datetime, date as date_cls
 
+import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from psycopg_pool import PoolTimeout
@@ -21,6 +24,34 @@ DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Ot
 
 # Neon/Supabase connection strings already carry `sslmode=require`.
 _pool: ConnectionPool | None = None
+
+
+class _IPv4Connection(psycopg.Connection):
+    """Connection that resolves the DB host to an IPv4 address before dialing.
+
+    Neon's endpoints are dual-stack, but Render has no outbound IPv6 route. When
+    the resolver transiently returns only AAAA records, every attempt targets an
+    unreachable IPv6 address ("Network is unreachable") and the pool can't
+    reconnect until DNS recovers. Passing `hostaddr` (looked up fresh per connect,
+    AF_INET only — Neon's LB IPs rotate, so never cache one) pins the dial to
+    IPv4 while `host` stays in the conninfo for TLS SNI, which Neon requires to
+    route to the right endpoint. On resolution failure we fall through to the
+    default path rather than fail: worst case is the old behavior.
+    """
+
+    @classmethod
+    def connect(cls, conninfo="", **kwargs):
+        params = conninfo_to_dict(conninfo)
+        host = kwargs.get("host") or params.get("host")
+        if host and "hostaddr" not in params and "hostaddr" not in kwargs:
+            try:
+                addrs = socket.getaddrinfo(
+                    host, None, socket.AF_INET, socket.SOCK_STREAM
+                )
+                kwargs["hostaddr"] = addrs[0][4][0]
+            except OSError:
+                pass
+        return super().connect(conninfo, **kwargs)
 
 
 def _get_pool() -> ConnectionPool:
@@ -50,6 +81,7 @@ def _get_pool() -> ConnectionPool:
             dsn,
             min_size=1,
             max_size=5,
+            connection_class=_IPv4Connection,
             check=ConnectionPool.check_connection,
             kwargs={
                 "row_factory": dict_row,
@@ -109,9 +141,37 @@ SCHEMA = [
         materialized_up_to CHAR(7) NOT NULL   -- 'YYYY-MM' last generated through
     )
     """,
-    # Income has always been conceptually monthly (the webapp adds it with recurring=TRUE);
-    # mark any older rows so they're treated as templates. Idempotent once all are TRUE.
-    "UPDATE transactions SET recurring = TRUE WHERE type = 'Income' AND NOT recurring",
+    # Income definitions live in their own table, not in transactions, so editing or
+    # deleting one can never rewrite history: the generated monthly instances are plain
+    # transaction rows that stay behind untouched. created_month is the month the
+    # definition took effect — add_income posts its first instance immediately, and
+    # materialize_recurring only fills months strictly after it (no double-post).
+    """
+    CREATE TABLE IF NOT EXISTS incomes (
+        id            TEXT PRIMARY KEY,
+        seq           BIGSERIAL,
+        user_id       BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
+        name          TEXT NOT NULL DEFAULT '',
+        amount        NUMERIC(12, 2) NOT NULL,
+        created_month CHAR(7) NOT NULL              -- 'YYYY-MM'
+    )
+    """,
+    # One-time migration off template rows: income used to live in transactions with
+    # recurring=TRUE, doubling as its creation month's entry. Each distinct template
+    # becomes a definition effective from its own month. DISTINCT ON collapses the
+    # duplicates an old startup statement used to create by re-flagging generated
+    # instances as templates (lowest seq = the original row). The old rows are then
+    # demoted to plain instances so that month's income stays in history. Idempotent:
+    # once no recurring income rows remain, both statements match nothing.
+    """
+    INSERT INTO incomes (id, user_id, name, amount, created_month)
+    SELECT DISTINCT ON (user_id, name, amount)
+           id, user_id, name, amount, to_char(date, 'YYYY-MM')
+    FROM transactions WHERE type = 'Income' AND recurring
+    ORDER BY user_id, name, amount, seq
+    ON CONFLICT (id) DO NOTHING
+    """,
+    "UPDATE transactions SET recurring = FALSE WHERE type = 'Income' AND recurring",
     """
     CREATE TABLE IF NOT EXISTS categories (
         user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -358,30 +418,92 @@ class Store:
             ).fetchall()
         return [_tx(r) for r in rows]
 
-    def income_transactions(self, user_id: int) -> list[dict]:
-        """A user's income templates, newest first — for the webapp's Income section
-        (manage/edit/delete). Income is recurring monthly; the generated monthly
-        instances (recurring=FALSE) are excluded so only the templates are listed."""
+    # --- income definitions (own table; instances are plain transactions) ---
+    @staticmethod
+    def _income(row) -> dict:
+        return {"id": row["id"], "name": row["name"] or "", "amount": float(row["amount"])}
+
+    def income_definitions(self, user_id: int) -> list[dict]:
+        """A user's income definitions, newest first — for the webapp's Income tab.
+        Definitions are templates only: the generated monthly instances are ordinary
+        transaction rows, so editing/deleting a definition never touches past months."""
         with _get_pool().connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM transactions WHERE user_id = %s AND type = 'Income' "
-                "AND recurring ORDER BY seq DESC",
+                "SELECT id, name, amount FROM incomes WHERE user_id = %s ORDER BY seq DESC",
                 (user_id,),
             ).fetchall()
-        return [_tx(r) for r in rows]
+        return [self._income(r) for r in rows]
+
+    def add_income(self, user_id: int, name: str, amount, current_ym: str):
+        """Create an income definition and immediately post its instance for the
+        current month (dated the 1st). Months after that come from
+        materialize_recurring, which skips created_month — so the two never
+        double-post. Returns (definition, instance transaction)."""
+        income_id = str(uuid.uuid4())[:8]
+        with _get_pool().connection() as conn:
+            conn.execute(
+                "INSERT INTO incomes (id, user_id, name, amount, created_month) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (income_id, user_id, name, amount, current_ym),
+            )
+            tx_row = conn.execute(
+                """
+                INSERT INTO transactions
+                    (id, user_id, date, type, category, amount, name, recurring, budget_excluded)
+                VALUES (%s, %s, %s, 'Income', 'Salary', %s, %s, FALSE, FALSE)
+                RETURNING *
+                """,
+                (str(uuid.uuid4())[:8], user_id, f"{current_ym}-01", amount, name),
+            ).fetchone()
+        return {"id": income_id, "name": name, "amount": float(amount)}, _tx(tx_row)
+
+    def edit_income(self, user_id: int, income_id: str, name=None, amount=None) -> dict | None:
+        """Update an income definition. Only future materializations pick up the new
+        values — already-posted instances (including the current month's) keep theirs."""
+        sets, params = [], []
+        if name is not None:
+            sets.append("name = %s"); params.append(name)
+        if amount is not None:
+            sets.append("amount = %s"); params.append(amount)
+        with _get_pool().connection() as conn:
+            if not sets:  # nothing to change — just return the current definition
+                row = conn.execute(
+                    "SELECT id, name, amount FROM incomes WHERE user_id = %s AND id = %s",
+                    (user_id, income_id),
+                ).fetchone()
+            else:
+                params += [user_id, income_id]
+                row = conn.execute(
+                    f"UPDATE incomes SET {', '.join(sets)} "
+                    "WHERE user_id = %s AND id = %s RETURNING id, name, amount",
+                    params,
+                ).fetchone()
+        return self._income(row) if row else None
+
+    def delete_income(self, user_id: int, income_id: str) -> dict | None:
+        """Delete an income definition: nothing is posted from next month on.
+        Already-posted instances (including the current month's) stay in history."""
+        with _get_pool().connection() as conn:
+            row = conn.execute(
+                "DELETE FROM incomes WHERE user_id = %s AND id = %s RETURNING id, name, amount",
+                (user_id, income_id),
+            ).fetchone()
+        return self._income(row) if row else None
 
     def materialize_recurring(self, user_id: int, current_ym: str) -> int:
-        """Generate this month's (and any missed months') concrete transactions from the
-        user's recurring templates. A "template" is a row with recurring=TRUE (recurring
-        expenses and income); each becomes a plain instance (recurring=FALSE) dated the
-        1st of the month, so it counts toward that month's spend/income while staying out
-        of the manage tabs and the recurring-total card (both filter recurring=TRUE).
+        """Generate this month's (and any missed months') concrete transactions from
+        the user's recurring templates: recurring expenses (transaction rows with
+        recurring=TRUE) and income definitions (the incomes table). Each becomes a
+        plain instance (recurring=FALSE) dated the 1st of the month, so it counts
+        toward that month's spend/income while staying out of the manage tabs and the
+        recurring-total card.
 
-        Idempotent + catch-up via a per-user watermark: the first run generates only the
-        current month (never back-filling pre-feature history), later runs fill every
-        month through `current_ym`. A template is skipped for its own creation month
-        (already counted by the template row itself), avoiding a double-count. Returns the
-        number of instances created."""
+        Idempotent + catch-up via a per-user watermark: the first run generates only
+        the current month (never back-filling pre-feature history), later runs fill
+        every month through `current_ym`. A template is skipped for its own creation
+        month — that month's entry already exists (the template row itself for
+        expenses; the instance add_income posted for income). Returns the number of
+        instances created."""
         with _get_pool().connection() as conn:
             row = conn.execute(
                 "SELECT materialized_up_to FROM recurring_state WHERE user_id = %s",
@@ -393,23 +515,33 @@ class Store:
             if not months:
                 return 0  # already materialized through current_ym
 
-            templates = conn.execute(
-                "SELECT date, type, category, amount, name, budget_excluded "
-                "FROM transactions WHERE user_id = %s AND recurring "
-                "AND type IN ('Expense', 'Income')",
+            expense_templates = conn.execute(
+                "SELECT date, category, amount, name, budget_excluded "
+                "FROM transactions WHERE user_id = %s AND recurring AND type = 'Expense'",
+                (user_id,),
+            ).fetchall()
+            income_defs = conn.execute(
+                "SELECT name, amount, created_month FROM incomes WHERE user_id = %s",
                 (user_id,),
             ).fetchall()
 
             new_rows = []
             for m in months:
                 first_of_month = f"{m}-01"
-                for t in templates:
+                for t in expense_templates:
                     # Skip the template's own creation month — that row already counts it.
                     if t["date"].strftime("%Y-%m") < m:
                         new_rows.append((
-                            str(uuid.uuid4())[:8], user_id, first_of_month, t["type"],
+                            str(uuid.uuid4())[:8], user_id, first_of_month, "Expense",
                             t["category"], t["amount"], t["name"], False,
                             t["budget_excluded"],
+                        ))
+                for d in income_defs:
+                    # Skip the definition's creation month — add_income posted it already.
+                    if d["created_month"] < m:
+                        new_rows.append((
+                            str(uuid.uuid4())[:8], user_id, first_of_month, "Income",
+                            "Salary", d["amount"], d["name"], False, False,
                         ))
 
             if new_rows:
