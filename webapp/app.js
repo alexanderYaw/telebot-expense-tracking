@@ -491,11 +491,10 @@ function renderAdd() {
   const incomeList = STATE.addType === 'income'
     ? `<div class="card"><p class="card-title">Active income</p>${incomeListBody()}</div>`
     : '';
-  // The Incoming section lists the month's money-in transactions — both one-off
-  // Incoming payments and the instances posted from income definitions — so the
-  // actual posted amount can be edited or deleted, not just the template.
+  // The Incoming section lists the month's one-off incoming payments so they can be
+  // edited or deleted here, next to the form that creates them.
   const incomingList = STATE.addType === 'incoming'
-    ? `<div class="card"><p class="card-title">Received in ${monthLabel(STATE.month)}</p>${incomingListBody()}</div>`
+    ? `<div class="card"><p class="card-title">Incoming in ${monthLabel(STATE.month)}</p>${incomingListBody()}</div>`
     : '';
 
   $('#view-add').innerHTML = `
@@ -635,17 +634,17 @@ function incomeListBody() {
   return STATE.income.map(incomeRow).join('');
 }
 
-// Every money-in transaction for the selected month, newest first: one-off Incoming
-// payments plus the instances posted from income definitions. These are ordinary
-// transactions, so txRow's tap-to-edit opens the normal edit/delete sheet — editing
-// one changes the payment actually recorded, not the income template behind it.
+// The selected month's one-off Incoming payments, newest first — matching what this
+// section's form creates. Income instances are deliberately excluded: they belong to
+// the Income section (their definition) and the Categories → Incoming filter (the
+// posted payment). Tap-to-edit comes free from txRow.
 function incomingListBody() {
   const rows = STATE.cache[STATE.month];
   if (!rows) return `<div class="banner">Loading…</div>`;
   const received = rows
-    .filter((t) => t.type === 'Income' || t.type === 'Incoming')
+    .filter((t) => t.type === 'Incoming')
     .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
-  if (!received.length) return emptyInline('Nothing received in ' + monthLabel(STATE.month));
+  if (!received.length) return emptyInline('No incoming payments in ' + monthLabel(STATE.month));
   return received.map(txRow).join('');
 }
 
@@ -901,8 +900,13 @@ function renderCategories() {
   // (i.e. not flagged off-budget); otherwise count every expense.
   const rows = monthRows.filter((t) =>
     t.type === 'Expense' && (!STATE.budgetOnly || !t.budget_excluded));
-  // Received one-off payments, grouped under the built-in "Incoming" pseudo-category.
-  const incomingRows = monthRows.filter((t) => t.type === 'Incoming');
+  // Every payment received this month, grouped under the built-in "Incoming"
+  // pseudo-category: one-off Incoming payments plus the instances posted from income
+  // definitions. Income rows keep their own "Income" pill (txRow handles that) — they
+  // are listed here so the posted payment can be edited or deleted like any other.
+  const incomingRows = monthRows
+    .filter((t) => t.type === 'Incoming' || t.type === 'Income')
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
 
   // per-category totals for the breakdown (expenses only)
   const byCat = {};
@@ -940,7 +944,7 @@ function renderCategories() {
     bodyCard = `
       <div class="card">
         <p class="card-title">🤝 Incoming · ${money(total)}</p>
-        ${incomingRows.length ? incomingRows.map(txRow).join('') : emptyInline('No incoming payments this month')}
+        ${incomingRows.length ? incomingRows.map(txRow).join('') : emptyInline('Nothing received this month')}
       </div>`;
   } else {
     const filtered = rows.filter((r) => r.category === STATE.categoryFilter);
