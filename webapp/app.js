@@ -491,11 +491,17 @@ function renderAdd() {
   const incomeList = STATE.addType === 'income'
     ? `<div class="card"><p class="card-title">Active income</p>${incomeListBody()}</div>`
     : '';
+  // The Incoming section lists the month's money-in transactions — both one-off
+  // Incoming payments and the instances posted from income definitions — so the
+  // actual posted amount can be edited or deleted, not just the template.
+  const incomingList = STATE.addType === 'incoming'
+    ? `<div class="card"><p class="card-title">Received in ${monthLabel(STATE.month)}</p>${incomingListBody()}</div>`
+    : '';
 
   $('#view-add').innerHTML = `
     <div class="segmented">${seg}</div>
     <div class="card">${addForm(STATE.addType)}</div>
-    ${recurringList}${incomeList}`;
+    ${recurringList}${incomeList}${incomingList}`;
 
   // Lazy-load the relevant list the first time the section is opened.
   if (STATE.addType === 'recurring' && STATE.recurring === null) {
@@ -506,6 +512,11 @@ function renderAdd() {
   if (STATE.addType === 'income' && STATE.income === null) {
     ensureIncome().then(() => {
       if (STATE.activeTab === 'add' && STATE.addType === 'income') renderAdd();
+    });
+  }
+  if (STATE.addType === 'incoming' && !STATE.cache[STATE.month]) {
+    ensureMonth(STATE.month).then(() => {
+      if (STATE.activeTab === 'add' && STATE.addType === 'incoming') renderAdd();
     });
   }
 
@@ -622,6 +633,20 @@ function incomeListBody() {
   if (STATE.income === null) return `<div class="banner">Loading…</div>`;
   if (!STATE.income.length) return emptyInline('No income yet');
   return STATE.income.map(incomeRow).join('');
+}
+
+// Every money-in transaction for the selected month, newest first: one-off Incoming
+// payments plus the instances posted from income definitions. These are ordinary
+// transactions, so txRow's tap-to-edit opens the normal edit/delete sheet — editing
+// one changes the payment actually recorded, not the income template behind it.
+function incomingListBody() {
+  const rows = STATE.cache[STATE.month];
+  if (!rows) return `<div class="banner">Loading…</div>`;
+  const received = rows
+    .filter((t) => t.type === 'Income' || t.type === 'Incoming')
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  if (!received.length) return emptyInline('Nothing received in ' + monthLabel(STATE.month));
+  return received.map(txRow).join('');
 }
 
 // Open the form in edit mode for the tapped row — recurring expense or income,
