@@ -1036,12 +1036,15 @@ def api_recurring_run(x_task_token: str = Header(default="")):
 @app.get("/health")
 def health():
     """Keep-alive target for an external cron (every ~10 min) so Render's free
-    instance never spins down. The SELECT 1 also keeps the scale-to-zero DB warm,
-    killing both cold starts in one ping. Public + cheap; exposes nothing.
+    instance never spins down. That is this endpoint's main job, and it holds
+    regardless of the status returned — Render counts the request as traffic
+    either way. Public + cheap; exposes nothing.
 
-    If the DB is still mid-wake, ping() returns False rather than raising: we
-    report 503 (DB warming) instead of a noisy 500 traceback. The attempt itself
-    kicks off Neon's wake, so the next ping lands warm."""
+    The SELECT 1 makes it a readiness check too, and the activity keeps Supabase
+    clear of its 7-day inactivity pause. When the DB can't be reached, ping()
+    returns False rather than raising and we report 503 instead of a noisy 500.
+    Safe to answer that way because Render's own Health Check Path is unset, so a
+    non-2xx here cannot mark the service unhealthy or restart it."""
     if store.ping():
         return {"ok": True}
     return JSONResponse(status_code=503, content={"ok": False, "db": "warming"})

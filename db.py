@@ -22,21 +22,27 @@ from psycopg_pool import PoolTimeout
 # list is fully user-editable (add/remove) and stored per user.
 DEFAULT_CATEGORIES = ["Food", "Transport", "Shopping", "Groceries", "Bills", "Others"]
 
-# Neon/Supabase connection strings already carry `sslmode=require`.
+# Supabase's connection string carries no sslmode, so DATABASE_URL appends
+# `?sslmode=require` itself. Without it libpq defaults to `prefer`, which does
+# negotiate TLS but silently accepts a plaintext fallback.
 _pool: ConnectionPool | None = None
 
 
 class _IPv4Connection(psycopg.Connection):
     """Connection that resolves the DB host to an IPv4 address before dialing.
 
-    Neon's endpoints are dual-stack, but Render has no outbound IPv6 route. When
-    the resolver transiently returns only AAAA records, every attempt targets an
-    unreachable IPv6 address ("Network is unreachable") and the pool can't
-    reconnect until DNS recovers. Passing `hostaddr` (looked up fresh per connect,
-    AF_INET only — Neon's LB IPs rotate, so never cache one) pins the dial to
-    IPv4 while `host` stays in the conninfo for TLS SNI, which Neon requires to
-    route to the right endpoint. On resolution failure we fall through to the
-    default path rather than fail: worst case is the old behavior.
+    Render has no outbound IPv6 route, so any host that resolves to AAAA records
+    is unreachable from there. Supabase's pooler is IPv4-only today, which makes
+    this a safety net rather than a live fix — it earns its keep by ensuring a
+    transient AAAA-only answer can't strand the pool ("Network is unreachable")
+    until DNS recovers. Passing `hostaddr` (looked up fresh per connect, AF_INET
+    only — the pooler answers with three rotating LB addresses, so never cache
+    one) pins the dial to IPv4 while `host` stays in the conninfo for TLS. On
+    resolution failure we fall through to the default path rather than fail:
+    worst case is the old behavior.
+
+    Note the direct endpoint (`db.<ref>.supabase.co`) has no A record at all, so
+    DATABASE_URL must point at the pooler regardless of this class.
     """
 
     @classmethod
@@ -63,20 +69,18 @@ def _get_pool() -> ConnectionPool:
         if not dsn:
             raise RuntimeError("DATABASE_URL is not set")
         # check_connection validates (and transparently recycles) each connection
-        # on checkout. Neon scales to zero and terminates idle connections server-
-        # side ("terminating connection due to administrator command"); without a
-        # check the pool would hand out a dead socket and the first query after an
-        # idle gap would 500. The check makes that first call reconnect instead.
+        # on checkout. Supavisor drops idle client connections server-side; without
+        # a check the pool would hand out a dead socket and the first query after
+        # an idle gap would 500. The check makes that first call reconnect instead.
         # prepare_threshold=None disables psycopg3's automatic server-side prepared
-        # statements. Neon's pooled endpoint (the `-pooler` host) is PgBouncer in
-        # transaction-pooling mode, where prepared statements span connections and
-        # break ("prepared statement already exists"). Harmless on a direct endpoint.
+        # statements. Mandatory on Supabase's pooled endpoint (port 6543), which is
+        # Supavisor in transaction-pooling mode: prepared statements would span
+        # pooled connections and break ("prepared statement already exists").
+        # Harmless in session mode (port 5432).
         # connect_timeout bounds each individual connection attempt. Without it,
-        # libpq falls back to the OS TCP timeout, so a single attempt to a
-        # Neon compute that's mid-wake can hang and monopolize the pool's
-        # background worker — burning most of the 30s checkout window on one
-        # failed attempt instead of retrying. 10s lets a slow wake fail fast
-        # and the pool reconnect within the checkout timeout.
+        # libpq falls back to the OS TCP timeout, so one unlucky attempt can hang
+        # and monopolize a pool worker — burning most of the 30s checkout window
+        # on a single failure instead of retrying.
         _pool = ConnectionPool(
             dsn,
             min_size=1,
@@ -188,11 +192,36 @@ SCHEMA = [
 ]
 
 
+def _reraise_connect_cause():
+    """Replace a bare PoolTimeout with libpq's own error, then return.
+
+    The pool dials in background workers and swallows each failure, so a
+    misconfigured DATABASE_URL (bad password, stray quote, wrong host) surfaces
+    only as "couldn't get a connection after 30.00 sec" — which names nothing.
+    Reproducing the connection in the foreground lets the driver's message reach
+    the logs. Returns normally if the direct attempt unexpectedly succeeds, so
+    the caller can re-raise the original timeout (pool exhaustion, not config).
+    """
+    with psycopg.connect(
+        os.environ["DATABASE_URL"], connect_timeout=10, prepare_threshold=None
+    ):
+        pass
+
+
 def init_schema():
-    """Create tables/indexes if they don't exist. Call once at startup."""
-    with _get_pool().connection() as conn:
-        for stmt in SCHEMA:
-            conn.execute(stmt)
+    """Create tables/indexes if they don't exist. Call once at startup.
+
+    A failure here aborts startup by design — the app is useless without its
+    database — but the error has to be legible, hence the retry-free second
+    attempt below.
+    """
+    try:
+        with _get_pool().connection() as conn:
+            for stmt in SCHEMA:
+                conn.execute(stmt)
+    except PoolTimeout:
+        _reraise_connect_cause()
+        raise
 
 
 # --- helpers -----------------------------------------------------------
@@ -717,12 +746,14 @@ class Store:
         return row["cleared_up_to"] if row else None
 
     def ping(self):
-        """Trivial query used by /health to keep the (scale-to-zero) DB warm.
+        """Trivial query used by /health to confirm the DB is reachable.
 
-        Returns True if the DB answered, False if it couldn't be reached in time
-        (e.g. Neon still mid-wake). The caller decides how to report that — this
-        is a keep-alive, so a transient cold-start miss shouldn't raise: the very
-        act of trying kicks off the wake, and the next ping lands warm."""
+        Returns True if the DB answered, False if it couldn't be reached in time.
+        The caller decides how to report that — this runs on a keep-alive ping, so
+        a transient miss shouldn't raise. It used to double as a wake-up for a
+        scale-to-zero Neon compute; on Supabase there is nothing to wake, and what
+        remains is the readiness signal plus activity that keeps the project clear
+        of its 7-day inactivity pause."""
         try:
             with _get_pool().connection() as conn:
                 conn.execute("SELECT 1")
