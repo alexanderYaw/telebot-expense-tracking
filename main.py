@@ -178,6 +178,12 @@ AWAITING_NAME, AWAITING_CATEGORY = range(2)
 ACTIVE_FLOWS: dict[int, float] = {}
 FLOW_GRACE_SECONDS = 900  # 15 min
 
+# An add-expense flow left idle this long is abandoned: the ConversationHandler ends
+# it (freeing the in-memory state and its ACTIVE_FLOWS entry) so it can't linger and
+# so a stranded user gets told rather than left in silence. Needs the job queue —
+# see the [job-queue] extra in requirements.txt.
+FLOW_TIMEOUT_SECONDS = 1800  # 30 min
+
 def _flow_start(update):
     ACTIVE_FLOWS[update.effective_chat.id] = time.time()
 
@@ -283,6 +289,31 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     _flow_end(update)
     await update.message.reply_text("❌ Cancelled.")
+    return ConversationHandler.END
+
+async def prompt_pick_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Catch plain text sent while the category buttons are showing (a number would
+    instead re-enter the flow via allow_reentry). Nudge the user to tap a button or
+    /cancel rather than swallowing the message and looking dead."""
+    await update.message.reply_text(
+        "👆 Tap one of the category buttons above, or /cancel to abort."
+    )
+    return AWAITING_CATEGORY
+
+async def flow_timeout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fires when an add-expense flow sits idle past FLOW_TIMEOUT_SECONDS. Clears the
+    in-memory state and its ACTIVE_FLOWS entry and tells the user, so an abandoned
+    flow expires instead of lingering (and can never strand them in silence)."""
+    context.user_data.clear()
+    if update.effective_chat is not None:
+        ACTIVE_FLOWS.pop(update.effective_chat.id, None)
+    try:
+        if update.effective_message is not None:
+            await update.effective_message.reply_text(
+                "⌛ Expense entry timed out. Send an amount like 12.50 to start again."
+            )
+    except TelegramError:
+        pass
     return ConversationHandler.END
 
 def format_date(date_str):
@@ -530,9 +561,26 @@ def build_application():
         entry_points=[MessageHandler(amount_msg, spend)],
         states={
             AWAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_name)],
-            AWAITING_CATEGORY: [CallbackQueryHandler(receive_category, pattern=r"^setcat\|")],
+            AWAITING_CATEGORY: [
+                CallbackQueryHandler(receive_category, pattern=r"^setcat\|"),
+                # Any other text here (e.g. the user typed the category instead of
+                # tapping) gets a nudge instead of silence. A bare number is caught
+                # earlier by the entry point (allow_reentry) and restarts the flow.
+                MessageHandler(filters.TEXT & ~filters.COMMAND, prompt_pick_category),
+            ],
+            # Reached when conversation_timeout elapses; clean up and notify.
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, flow_timeout),
+                CallbackQueryHandler(flow_timeout),
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        # A fresh amount always restarts the flow, so a stranded conversation (e.g. the
+        # nightly clear deleted the category keyboard) can never wedge the bot: without
+        # this, entry points aren't re-checked mid-conversation and every new number was
+        # silently swallowed. The timeout expires abandoned flows on its own.
+        allow_reentry=True,
+        conversation_timeout=FLOW_TIMEOUT_SECONDS,
     )
     application.add_handler(add_expense_conv)
 

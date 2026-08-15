@@ -1,7 +1,9 @@
 # Telegram bot framework. We feed updates to PTB ourselves from the FastAPI
 # webhook route (no run_webhook), so the [webhooks]/tornado extra is no longer
-# needed — uvicorn is our HTTP server instead.
-python-telegram-bot==21.9
+# needed — uvicorn is our HTTP server instead. The [job-queue] extra (APScheduler)
+# backs the add-expense flow's conversation_timeout; without it PTB would silently
+# ignore the timeout.
+python-telegram-bot[job-queue]==21.9
 
 # Web server: one ASGI app serves the Telegram webhook, the /api routes, and
 # the static Mini App (webapp/).
